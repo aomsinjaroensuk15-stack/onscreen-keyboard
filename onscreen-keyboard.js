@@ -1,0 +1,353 @@
+/* ============================================================
+ * On-Screen Keyboard  v1.0  —  ไทย / English (Kedmanee, TIS 820)
+ * Vanilla JS, zero dependency (inject CSS เอง)
+ *
+ * วิธีใช้:
+ *   <textarea id="out"></textarea>
+ *   <div id="kb"></div>
+ *   <script src="onscreen-keyboard.js"></script>
+ *   <script>OnScreenKeyboard.init({container:'#kb', output:'#out'});</script>
+ *
+ * options: container (ต้องมี), output (ไม่ใส่ = สร้าง textarea ให้เอง),
+ *          lang: 'th'|'en' (default 'th'), led: true|false (default true),
+ *          sound: true|false (default true)
+ * ============================================================ */
+(function () {
+'use strict';
+
+/* ==================== PHASE 1/3 : layout data ==================== */
+/* แต่ละ key: [id/event.code, ตัวพิมพ์เล็ก, ตัวพิมพ์ใหญ่(Shift), ความกว้าง] */
+var LAY = {
+en: { rows: [
+  [['Backquote','`','~'],['Digit1','1','!'],['Digit2','2','@'],['Digit3','3','#'],['Digit4','4','$'],['Digit5','5','%'],['Digit6','6','^'],['Digit7','7','&'],['Digit8','8','*'],['Digit9','9','('],['Digit0','0',')'],['Minus','-','_'],['Equal','=','+'],['Backspace','\u232B','','osk-w2']],
+  [['Tab','Tab','','osk-w15'],['KeyQ','q','Q'],['KeyW','w','W'],['KeyE','e','E'],['KeyR','r','R'],['KeyT','t','T'],['KeyY','y','Y'],['KeyU','u','U'],['KeyI','i','I'],['KeyO','o','O'],['KeyP','p','P'],['BracketLeft','[','{'],['BracketRight',']','}'],['Backslash','\\','|']],
+  [['Caps','Caps','','osk-w175'],['KeyA','a','A'],['KeyS','s','S'],['KeyD','d','D'],['KeyF','f','F'],['KeyG','g','G'],['KeyH','h','H'],['KeyJ','j','J'],['KeyK','k','K'],['KeyL','l','L'],['Semicolon',';',':'],['Quote',"'",'"'],['Enter','Enter','','osk-w225']],
+  [['ShiftL','Shift','','osk-w225'],['KeyZ','z','Z'],['KeyX','x','X'],['KeyC','c','C'],['KeyV','v','V'],['KeyB','b','B'],['KeyN','n','N'],['KeyM','m','M'],['Comma',',','<'],['Period','.','>'],['Slash','/','?'],['ShiftR','Shift','','osk-w275']],
+  [['Ctrl','Ctrl','','osk-w15'],['Win','Win','','osk-w15'],['Alt','Alt','','osk-w15'],['Space','','','osk-w6'],['AltGr','AltGr','','osk-w15'],['Lang','ไทย','','osk-w175'],['ARR']]
+]},
+th: { rows: [
+  [['Backquote','%','_'],['Digit1','ๅ','๑'],['Digit2','/','๒'],['Digit3','-','๓'],['Digit4','ภ','๔'],['Digit5','ถ','ู'],['Digit6','ุ','฿'],['Digit7','ึ','๕'],['Digit8','ค','๖'],['Digit9','ต','๗'],['Digit0','จ','๘'],['Minus','ข','๙'],['Equal','ช',''],['Backspace','\u232B','','osk-w2']],
+  [['Tab','Tab','๐','osk-w15'],['KeyQ','ๆ','"'],['KeyW','ไ','ฎ'],['KeyE','ำ','ฑ'],['KeyR','พ','ธ'],['KeyT','ะ','ํ'],['KeyY','ั','๊'],['KeyU','ี','ณ'],['KeyI','ร','ฯ'],['KeyO','น','ญ'],['KeyP','ย','ฐ'],['BracketLeft','บ',','],['BracketRight','ล',''],['Backslash','ฃ','']],
+  [['Caps','Caps','','osk-w175'],['KeyA','ฟ','ฆ'],['KeyS','ห','ฏ'],['KeyD','ก','โ'],['KeyF','ด','ฌ'],['KeyG','เ','็'],['KeyH','้','๋'],['KeyJ','่','ษ'],['KeyK','า','ศ'],['KeyL','ส','ซ'],['Semicolon','ว','.'],['Quote','ง','ฅ'],['Enter','Enter','','osk-w225']],
+  [['ShiftL','Shift','','osk-w225'],['KeyZ','ผ','('],['KeyX','ป',')'],['KeyC','แ','ฉ'],['KeyV','อ','ฮ'],['KeyB','ิ','ฺ'],['KeyN','ื','์'],['KeyM','ท','?'],['Comma','ม','ฒ'],['Period','ใ','ฬ'],['Slash','ฝ','ฦ'],['ShiftR','Shift','','osk-w275']],
+  [['Ctrl','Ctrl','','osk-w15'],['Win','Win','','osk-w15'],['Alt','Alt','','osk-w15'],['Space','','','osk-w6'],['AltGr','AltGr','','osk-w15'],['Lang','EN','','osk-w175'],['ARR']]
+]}};
+
+/* ==================== PHASE 2/3 : CSS + state + helpers ==================== */
+var CSS = `
+.osk-wrap{font-family:'Segoe UI',Tahoma,sans-serif;width:100%;max-width:960px}
+.osk-bar{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.osk-btn{border:1px solid #c9c9cf;background:#fff;border-radius:8px;padding:8px 14px;font-size:14px;cursor:pointer;color:#222}
+.osk-btn:hover{background:#f0f0f3}
+.osk-out{width:100%;box-sizing:border-box;border:1px solid #c9c9cf;border-radius:12px;background:#fff;padding:12px 14px;font-size:18px;min-height:96px;resize:vertical;margin-bottom:12px;font-family:inherit;color:#222}
+.osk-kb{background:#202024;border-radius:16px;padding:12px;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+.osk-row{display:flex;gap:6px;margin-bottom:6px}
+.osk-k{--h:0;--osk-hue:0;flex:1 1 0;min-width:0;height:48px;border:none;border-radius:6px;background:#3f3f46;color:#f4f4f6;font-size:15px;position:relative;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:manipulation;box-shadow:0 3px 0 #17171a;font-family:inherit;transition:transform .08s ease-out,background .08s ease-out}
+.osk-k .osk-s{position:absolute;top:3px;right:6px;font-size:10px;color:#a5a5ad;pointer-events:none}
+.osk-k:hover{background:#4c4c54}
+.osk-k.pressed{transform:translateY(2px);box-shadow:0 1px 0 #17171a;background:#5a5a63}
+.osk-k.on{background:#f4f4f6;color:#202024}
+.osk-k.on .osk-s{color:#55555e}
+.osk-w15{flex-grow:1.5}.osk-w175{flex-grow:1.75}.osk-w2{flex-grow:2}.osk-w225{flex-grow:2.25}.osk-w275{flex-grow:2.75}.osk-w6{flex-grow:6}
+.osk-arr{flex:2.6 1 0;display:flex;flex-direction:column;gap:6px}
+.osk-arow{display:flex;gap:6px;flex:1}
+.osk-arow .osk-k{height:auto;min-height:22px}
+.osk-sp{flex:1;visibility:hidden}
+@property --osk-hue{syntax:'<number>';inherits:false;initial-value:0}
+.osk-led .osk-k{animation:oskHue 5s linear infinite;box-shadow:0 3px 0 #17171a,0 0 12px 2px hsl(calc(var(--h) + var(--osk-hue)) 100% 60% / .5)}
+.osk-led .osk-k .osk-c{text-shadow:0 0 8px hsl(calc(var(--h) + var(--osk-hue)) 100% 65% / .85)}
+@keyframes oskHue{to{--osk-hue:360}}
+`;
+
+/* ---------- state ---------- */
+var SCR = null, KB = null, BAR = {};
+   // SCR = element ที่พิมพ์ลงไป, KB = กรอบแป้นพิมพ์
+var lang = 'th', caps = false, held = false, sticky = false, shiftUsed = false;
+var sndOn = true, ledOn = true, ac = null, codeMap = {}, DEFS = {};
+
+/* ---------- helpers: ตัวอักษรที่จะพิมพ์ ---------- */
+function shiftActive() { return held || sticky; }
+function effChar(def) {
+  var sh = shiftActive();
+  if (/^[a-z]$/.test(def.b) && caps) { return sh ? def.b : def.s; } // อังกฤษเท่านั้นที่ Caps มีผล
+  return sh ? (def.s || def.b) : def.b;
+}
+
+/* ---------- helpers: แทรก/ลบ/เลื่อนเคอร์เซอร์ ---------- */
+function ins(t) {
+  var s = SCR.selectionStart == null ? SCR.value.length : SCR.selectionStart;
+  var e = SCR.selectionEnd   == null ? SCR.value.length : SCR.selectionEnd;
+  SCR.value = SCR.value.slice(0, s) + t + SCR.value.slice(e);
+  SCR.setSelectionRange(s + t.length, s + t.length);
+}
+function delBack() {
+  var v = SCR.value, s = SCR.selectionStart, e = SCR.selectionEnd;
+  if (s !== e) { SCR.value = v.slice(0, s) + v.slice(e); SCR.setSelectionRange(s, s); return; }
+  if (!s) return;
+  var ch = [...v.slice(0, s)]; ch.pop();                 // รองรับ surrogate pair (อีโมจิไม่พัง)
+  SCR.value = ch.join('') + v.slice(s);
+  SCR.setSelectionRange(s - 1, s - 1);
+}
+function delFwd() {
+  var v = SCR.value, s = SCR.selectionStart, e = SCR.selectionEnd;
+  if (s !== e) { SCR.value = v.slice(0, s) + v.slice(e); SCR.setSelectionRange(s, s); return; }
+  if (e >= v.length) return;
+  var seg = [...v.slice(e)], p = e + seg[0].length;
+  SCR.value = v.slice(0, e) + v.slice(p);
+  SCR.setSelectionRange(e, e);
+}
+function move(d) {   // d = -1 ซ้าย / +1 ขวา (ทีละ 1 ตัวอักษร)
+  var v = SCR.value, s = SCR.selectionStart, e = SCR.selectionEnd;
+  if (d < 0) {
+    if (s !== e) { SCR.setSelectionRange(s, s); return; }
+    if (!s) return;
+    var p = [...v.slice(0, s)].slice(0, -1).join('').length;
+    SCR.setSelectionRange(p, p);
+  } else {
+    if (s !== e) { SCR.setSelectionRange(e, e); return; }
+    if (e >= v.length) return;
+    var seg = [...v.slice(e)];
+    SCR.setSelectionRange(e + seg[0].length, e + seg[0].length);
+  }
+}
+function moveLine(d) {   // ลูกศรขึ้น/ลง — คงคอลัมน์ไว้ (ประมาณการต่อบรรทัด)
+  var v = SCR.value, pos = SCR.selectionStart;
+  var before = v.slice(0, pos), lineStart = before.lastIndexOf('\n') + 1;
+  var col = [...before.slice(lineStart)].length;
+  var nl = v.indexOf('\n', pos);
+  if (d < 0) {
+    if (!lineStart) return;
+    var prevEnd = lineStart - 1, prevStart = v.lastIndexOf('\n', Math.max(0, prevEnd - 1)) + 1;
+    var len = [...v.slice(prevStart, prevEnd)].length;
+    var p = prevStart + [...v.slice(prevStart, prevStart + Math.min(col, len))].join('').length;
+    SCR.setSelectionRange(p, p);
+  } else {
+    if (nl === -1) return;
+    var ns = nl + 1, nn = v.indexOf('\n', ns), ne = nn === -1 ? v.length : nn;
+    var len2 = [...v.slice(ns, ne)].length;
+    var p2 = ns + [...v.slice(ns, ns + Math.min(col, len2))].join('').length;
+    SCR.setSelectionRange(p2, p2);
+  }
+}
+
+/* ---------- helper: เสียงคลิกแบบ mechanical keyboard ---------- */
+function snd() {
+  if (!sndOn) return;
+  try {
+    ac = ac || new (window.AudioContext || window.webkitAudioContext)();
+    var t = ac.currentTime, o = ac.createOscillator(), g = ac.createGain();
+    o.type = 'triangle';
+    o.frequency.setValueAtTime(1500, t);
+    o.frequency.exponentialRampToValueAtTime(700, t + 0.04);
+    g.gain.setValueAtTime(0.05, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+    o.connect(g); g.connect(ac.destination);
+    o.start(t); o.stop(t + 0.06);
+  } catch (e) {}
+}
+
+/* ==================== PHASE 3/3 : render + events + init ==================== */
+function syncMeta() {
+  KB.querySelectorAll('[data-id="ShiftL"],[data-id="ShiftR"]').forEach(function (b) { b.classList.toggle('on', shiftActive()); });
+  KB.querySelectorAll('[data-id="Caps"]').forEach(function (b) { b.classList.toggle('on', caps); });
+  BAR.lang.textContent = lang === 'th' ? 'ไทย' : 'EN';
+}
+function toggleLang() { lang = lang === 'th' ? 'en' : 'th'; render(); }
+
+/* กระจาย action ของทุกปุ่ม (ทั้ง click หน้าจอและคีย์บอร์ดจริง) */
+function act(id, def, phys) {
+  if (id === 'ShiftL' || id === 'ShiftR') {
+    if (phys) { held = true; }
+    else if (held) { shiftUsed = true; } else { held = true; shiftUsed = false; }
+    syncMeta(); return;
+  }
+  if (id === 'Caps') { caps = !caps; syncMeta(); return; }
+  if (id === 'Lang') { toggleLang(); return; }
+  if (id === 'Backspace') { delBack(); snd(); return; }
+  if (id === 'Delete')    { delFwd();  snd(); return; }
+  if (id === 'Enter')     { ins('\n'); snd(); return; }
+  if (id === 'Tab')       { ins(shiftActive() && lang === 'th' ? '๐' : '\t'); snd(); return; }
+  if (id === 'Space')     { ins(' ');  snd(); return; }
+  if (id === 'Up')    { moveLine(-1); return; }
+  if (id === 'Down')  { moveLine(1);  return; }
+  if (id === 'Left')  { move(-1); return; }
+  if (id === 'Right') { move(1);  return; }
+  if (id === 'Ctrl' || id === 'Win' || id === 'Alt' || id === 'AltGr') return; // ตกแต่ง
+  if (!def || !def.b) return;
+  ins(effChar(def));
+  snd(); shiftUsed = true;
+  if (sticky) sticky = false;   // Shift แบบแตะ 1 ครั้ง — พิมพ์ไป 1 ตัวแล้วคืนค่า
+  syncMeta();
+}
+
+/* สร้างปุ่ม 1 ปุ่ม + ผูก pointer event + ใส่ hue สำหรับ LED เรนโบว์ */
+var hueCounter = 0;
+function mkBtn(id, base, shift, code, w) {
+  var b = document.createElement('button');
+  b.className = 'osk-k ' + (w || '');
+  b.dataset.id = id;
+  if (code) b.dataset.code = code;
+  b.style.setProperty('--h', (hueCounter++ * 14) % 360);   // ไล่สีเรนโบว์ทีละปุ่ม
+  if (base) {
+    var sp = document.createElement('span');
+    sp.className = 'osk-c';
+    sp.textContent = base;
+    b.appendChild(sp);
+  }
+  if (shift) {
+    var ss = document.createElement('span');
+    ss.className = 'osk-s';
+    ss.textContent = shift;
+    b.appendChild(ss);
+  }
+  b.addEventListener('pointerdown', function (ev) {
+    ev.preventDefault();                       // กัน textarea เสีย focus
+    b.classList.add('pressed');
+    setTimeout(function () { b.classList.remove('pressed'); }, 130);
+    act(id, DEFS[id], false);
+  });
+  if (id === 'ShiftL' || id === 'ShiftR') {
+    var rel = function () {                    // ปล่อย Shift: ถ้าไม่ได้พิมพ์อะไรเลย = สลับ sticky
+      if (held && !shiftUsed) sticky = !sticky;
+      held = false; shiftUsed = false; syncMeta();
+    };
+    b.addEventListener('pointerup', rel);
+    b.addEventListener('pointercancel', rel);
+  }
+  return b;
+}
+
+/* กลุ่มลูกศร (แบบ inverted-T) */
+function arrows() {
+  var w = document.createElement('div'); w.className = 'osk-arr';
+  var r1 = document.createElement('div'); r1.className = 'osk-arow';
+  var s1 = document.createElement('div'); s1.className = 'osk-sp';
+  var s2 = document.createElement('div'); s2.className = 'osk-sp';
+  r1.appendChild(s1); r1.appendChild(mkBtn('Up', '↑', '', 'ArrowUp')); r1.appendChild(s2);
+  var r2 = document.createElement('div'); r2.className = 'osk-arow';
+  r2.appendChild(mkBtn('Left', '←', '', 'ArrowLeft'));
+  r2.appendChild(mkBtn('Down', '↓', '', 'ArrowDown'));
+  r2.appendChild(mkBtn('Right', '→', '', 'ArrowRight'));
+  w.appendChild(r1); w.appendChild(r2);
+  return w;
+}
+
+/* วาดคีย์บอร์ดตามภาษาปัจจุบัน */
+function render() {
+  KB.innerHTML = ''; codeMap = {}; DEFS = {}; hueCounter = 0;
+  LAY[lang].rows.forEach(function (row) {
+    var r = document.createElement('div'); r.className = 'osk-row';
+    row.forEach(function (k) {
+      if (k[0] === 'ARR') { r.appendChild(arrows()); return; }
+      DEFS[k[0]] = { b: k[1], s: k[2] };
+      r.appendChild(mkBtn(k[0], k[1], k[2], k[0], k[3]));
+    });
+    KB.appendChild(r);
+  });
+  KB.querySelectorAll('[data-code]').forEach(function (b) { codeMap[b.dataset.code] = b; });
+  syncMeta();
+}
+
+/* ---------- คีย์บอร์ดจริง: กดแล้วปุ่มบนหน้าจอกะพริบตามตำแหน่งจริง (event.code) ---------- */
+document.addEventListener('keydown', function (e) {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;   // ให้ Ctrl+C/V, Alt+... ทำงานปกติ
+  var b = codeMap[e.code];
+  if (!b) return;                                    // ปุ่มที่ไม่มีบนจอ (Delete, Home...) ให้ native จัดการ
+  e.preventDefault();
+  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+    b.classList.add('pressed');
+    if (!e.repeat) act('ShiftL', null, true);
+    syncMeta(); return;
+  }
+  if (e.code === 'CapsLock') {
+    b.classList.add('pressed');
+    if (!e.repeat) act('Caps');
+    return;
+  }
+  b.classList.add('pressed');
+  act(b.dataset.id, DEFS[b.dataset.id], true);
+});
+document.addEventListener('keyup', function (e) {
+  var b = codeMap[e.code];
+  if (b) b.classList.remove('pressed');
+  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+    held = false;
+    if (!shiftUsed) sticky = !sticky;                // แตะ Shift บนคีย์บอร์ดจริง = sticky เหมือนหน้าจอ
+    shiftUsed = false; syncMeta();
+  }
+});
+window.addEventListener('blur', function () {
+  held = false;
+  KB.querySelectorAll('.pressed').forEach(function (x) { x.classList.remove('pressed'); });
+});
+
+/* ---------- init ---------- */
+function injectStyle() {
+  if (document.getElementById('osk-style')) return;
+  var st = document.createElement('style');
+  st.id = 'osk-style';
+  st.textContent = CSS;
+  document.head.appendChild(st);
+}
+function barBtn(label, fn) {
+  var b = document.createElement('button');
+  b.className = 'osk-btn'; b.textContent = label;
+  b.addEventListener('click', function () { fn(); SCR.focus(); });
+  return b;
+}
+function init(opts) {
+  opts = opts || {};
+  injectStyle();
+  var container = typeof opts.container === 'string' ? document.querySelector(opts.container) : opts.container;
+  if (!container) { console.error('OnScreenKeyboard: ไม่เจอ container'); return; }
+  if (container.dataset.osk) return;                 // กัน init ซ้ำ
+  container.dataset.osk = '1';
+
+  SCR = typeof opts.output === 'string' ? document.querySelector(opts.output)
+      : (opts.output || null);
+  if (!SCR) {
+    SCR = document.createElement('textarea');
+    SCR.className = 'osk-out';
+    SCR.placeholder = 'พิมพ์ที่นี่... / Type here...';
+    container.appendChild(SCR);
+  }
+  var bar = document.createElement('div'); bar.className = 'osk-bar';
+  BAR.lang = barBtn('ไทย', toggleLang);
+  BAR.led  = barBtn('ไฟ LED: เปิด', function () {
+    ledOn = !ledOn;
+    KB.classList.toggle('osk-led', ledOn);
+    BAR.led.textContent = ledOn ? 'ไฟ LED: เปิด' : 'ไฟ LED: ปิด';
+  });
+  BAR.snd  = barBtn('เสียง: เปิด', function () {
+    sndOn = !sndOn;
+    BAR.snd.textContent = sndOn ? 'เสียง: เปิด' : 'เสียง: ปิด';
+  });
+  BAR.clr  = barBtn('ล้างข้อความ', function () { SCR.value = ''; });
+  bar.appendChild(BAR.lang); bar.appendChild(BAR.led);
+  bar.appendChild(BAR.snd);  bar.appendChild(BAR.clr);
+  container.appendChild(bar);
+
+  KB = document.createElement('div'); KB.className = 'osk-kb';
+  container.appendChild(KB);
+
+  if (opts.lang === 'en') lang = 'en';
+  if (opts.sound === false) { sndOn = false; }
+  if (opts.led === false) ledOn = false;
+  KB.classList.toggle('osk-led', ledOn);
+  BAR.led.textContent = ledOn ? 'ไฟ LED: เปิด' : 'ไฟ LED: ปิด';
+  if (!sndOn) BAR.snd.textContent = 'เสียง: ปิด';
+
+  render();
+  SCR.focus();
+}
+
+/* auto-init: ถ้าหน้าเว็บมี <div id="osk"> หรือ <div id="kb"> อยู่แล้ว */
+function autoInit() {
+  var c = document.getElementById('osk') || document.getElementById('kb');
+  if (c && !c.dataset.osk) init({ container: c });
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', autoInit);
+else autoInit();
+
+window.OnScreenKeyboard = { init: init, render: render };
+})();
