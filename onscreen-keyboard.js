@@ -351,3 +351,4 @@ else autoInit();
 
 window.OnScreenKeyboard = { init: init, render: render };
 })();
+  
