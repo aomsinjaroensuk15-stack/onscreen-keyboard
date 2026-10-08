@@ -1,22 +1,17 @@
 /* ============================================================
- * On-Screen Keyboard  v1.0  —  ไทย / English (Kedmanee, TIS 820)
+ * On-Screen Keyboard  v1.1  —  ไทย / English (Kedmanee, TIS 820)
  * Vanilla JS, zero dependency (inject CSS เอง)
+ * v1.1: แป้นหนาขึ้น + พิมพ์ลง element ที่แตะล่าสุด (input/textarea/contenteditable)
  *
  * วิธีใช้:
- *   <textarea id="out"></textarea>
  *   <div id="kb"></div>
  *   <script src="onscreen-keyboard.js"></script>
- *   <script>OnScreenKeyboard.init({container:'#kb', output:'#out'});</script>
- *
- * options: container (ต้องมี), output (ไม่ใส่ = สร้าง textarea ให้เอง),
- *          lang: 'th'|'en' (default 'th'), led: true|false (default true),
- *          sound: true|false (default true)
+ *   <script>OnScreenKeyboard.init({container:'#kb'});</script>
  * ============================================================ */
 (function () {
 'use strict';
 
 /* ==================== PHASE 1/3 : layout data ==================== */
-/* แต่ละ key: [id/event.code, ตัวพิมพ์เล็ก, ตัวพิมพ์ใหญ่(Shift), ความกว้าง] */
 var LAY = {
 en: { rows: [
   [['Backquote','`','~'],['Digit1','1','!'],['Digit2','2','@'],['Digit3','3','#'],['Digit4','4','$'],['Digit5','5','%'],['Digit6','6','^'],['Digit7','7','&'],['Digit8','8','*'],['Digit9','9','('],['Digit0','0',')'],['Minus','-','_'],['Equal','=','+'],['Backspace','\u232B','','osk-w2']],
@@ -35,83 +30,142 @@ th: { rows: [
 
 /* ==================== PHASE 2/3 : CSS + state + helpers ==================== */
 var CSS = `
-.osk-wrap{font-family:'Segoe UI',Tahoma,sans-serif;width:100%;max-width:960px}
-.osk-bar{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.osk-wrap{font-family:'Segoe UI',Tahoma,sans-serif;width:100%;max-width:980px}
+.osk-bar{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center}
 .osk-btn{border:1px solid #c9c9cf;background:#fff;border-radius:8px;padding:8px 14px;font-size:14px;cursor:pointer;color:#222}
 .osk-btn:hover{background:#f0f0f3}
-.osk-out{width:100%;box-sizing:border-box;border:1px solid #c9c9cf;border-radius:12px;background:#fff;padding:12px 14px;font-size:18px;min-height:96px;resize:vertical;margin-bottom:12px;font-family:inherit;color:#222}
-.osk-kb{background:#202024;border-radius:16px;padding:12px;box-shadow:0 8px 24px rgba(0,0,0,.25)}
-.osk-row{display:flex;gap:6px;margin-bottom:6px}
-.osk-k{--h:0;--osk-hue:0;flex:1 1 0;min-width:0;height:48px;border:none;border-radius:6px;background:#3f3f46;color:#f4f4f6;font-size:15px;position:relative;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:manipulation;box-shadow:0 3px 0 #17171a;font-family:inherit;transition:transform .08s ease-out,background .08s ease-out}
-.osk-k .osk-s{position:absolute;top:3px;right:6px;font-size:10px;color:#a5a5ad;pointer-events:none}
+.osk-tgt{margin-left:auto;font-size:12px;color:#888;font-style:italic}
+.osk-out{width:100%;box-sizing:border-box;border:1px solid #c9c9cf;border-radius:12px;background:#fff;padding:12px 14px;font-size:18px;min-height:88px;resize:vertical;margin-bottom:12px;font-family:inherit;color:#222}
+.osk-kb{background:#202024;border-radius:16px;padding:14px;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+.osk-row{display:flex;gap:8px;margin-bottom:8px}
+.osk-k{--h:0;--osk-hue:0;flex:1 1 0;min-width:0;height:56px;border:none;border-radius:7px;background:#3f3f46;color:#f4f4f6;font-size:16px;position:relative;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:manipulation;box-shadow:0 4px 0 #17171a;font-family:inherit;transition:transform .08s ease-out,background .08s ease-out}
+.osk-k .osk-s{position:absolute;top:4px;right:7px;font-size:11px;color:#a5a5ad;pointer-events:none}
 .osk-k:hover{background:#4c4c54}
-.osk-k.pressed{transform:translateY(2px);box-shadow:0 1px 0 #17171a;background:#5a5a63}
+.osk-k.pressed{transform:translateY(3px);box-shadow:0 1px 0 #17171a;background:#5a5a63}
 .osk-k.on{background:#f4f4f6;color:#202024}
 .osk-k.on .osk-s{color:#55555e}
 .osk-w15{flex-grow:1.5}.osk-w175{flex-grow:1.75}.osk-w2{flex-grow:2}.osk-w225{flex-grow:2.25}.osk-w275{flex-grow:2.75}.osk-w6{flex-grow:6}
-.osk-arr{flex:2.6 1 0;display:flex;flex-direction:column;gap:6px}
-.osk-arow{display:flex;gap:6px;flex:1}
-.osk-arow .osk-k{height:auto;min-height:22px}
+.osk-arr{flex:2.6 1 0;display:flex;flex-direction:column;gap:8px}
+.osk-arow{display:flex;gap:8px;flex:1}
+.osk-arow .osk-k{height:auto;min-height:26px}
 .osk-sp{flex:1;visibility:hidden}
 @property --osk-hue{syntax:'<number>';inherits:false;initial-value:0}
-.osk-led .osk-k{animation:oskHue 5s linear infinite;box-shadow:0 3px 0 #17171a,0 0 12px 2px hsl(calc(var(--h) + var(--osk-hue)) 100% 60% / .5)}
+.osk-led .osk-k{animation:oskHue 5s linear infinite;box-shadow:0 4px 0 #17171a,0 0 14px 2px hsl(calc(var(--h) + var(--osk-hue)) 100% 60% / .5)}
 .osk-led .osk-k .osk-c{text-shadow:0 0 8px hsl(calc(var(--h) + var(--osk-hue)) 100% 65% / .85)}
 @keyframes oskHue{to{--osk-hue:360}}
 `;
 
 /* ---------- state ---------- */
-var SCR = null, KB = null, BAR = {};
-   // SCR = element ที่พิมพ์ลงไป, KB = กรอบแป้นพิมพ์
+var SCR = null, KB = null, BAR = {}, activeEl = null;
 var lang = 'th', caps = false, held = false, sticky = false, shiftUsed = false;
 var sndOn = true, ledOn = true, ac = null, codeMap = {}, DEFS = {};
+
+/* ---------- focus tracking: จำ element ที่ผู้ใช้แตะ/คลิกล่าสุด ---------- */
+function isTypeable(el) {
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  var tag = el.tagName;
+  if (tag === 'TEXTAREA') return true;
+  if (tag === 'INPUT') {
+    var t = (el.getAttribute('type') || 'text').toLowerCase();
+    return ['text','search','url','tel','password','email','number'].indexOf(t) >= 0;
+  }
+  return false;
+}
+function TGT() { return isTypeable(activeEl) ? activeEl : SCR; }
+function targetName(el) {
+  if (!el) return '—';
+  if (el === SCR) return 'กระดานโน้ตของคีย์บอร์ด';
+  return '<' + el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + '>';
+}
+document.addEventListener('focusin', function (e) {
+  if (!SCR) return;
+  if (KB && KB.contains(e.target)) return;          // focus ในตัวคีย์บอร์ดเอง — ไม่สน
+  if (e.target.closest && e.target.closest('.osk-wrap')) return;
+  if (isTypeable(e.target)) {
+    activeEl = e.target;
+    if (BAR.tgt) BAR.tgt.textContent = 'พิมพ์ลง: ' + targetName(activeEl);
+  }
+});
 
 /* ---------- helpers: ตัวอักษรที่จะพิมพ์ ---------- */
 function shiftActive() { return held || sticky; }
 function effChar(def) {
   var sh = shiftActive();
-  if (/^[a-z]$/.test(def.b) && caps) { return sh ? def.b : def.s; } // อังกฤษเท่านั้นที่ Caps มีผล
+  if (/^[a-z]$/.test(def.b) && caps) { return sh ? def.b : def.s; }
   return sh ? (def.s || def.b) : def.b;
 }
 
-/* ---------- helpers: แทรก/ลบ/เลื่อนเคอร์เซอร์ ---------- */
+/* ---------- helpers: แทรก/ลบ/เลื่อนเคอร์เซอร์ (ทั้ง textarea/input และ contenteditable) ---------- */
+function setVal(el, v) {   // native setter — ให้ React/Vue/Angular ตรวจจับการเปลี่ยนค่าได้
+  var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v);
+}
+function fireInput(el) { el.dispatchEvent(new Event('input', { bubbles: true })); }
 function ins(t) {
-  var s = SCR.selectionStart == null ? SCR.value.length : SCR.selectionStart;
-  var e = SCR.selectionEnd   == null ? SCR.value.length : SCR.selectionEnd;
-  SCR.value = SCR.value.slice(0, s) + t + SCR.value.slice(e);
-  SCR.setSelectionRange(s + t.length, s + t.length);
+  var el = TGT();
+  if (el.isContentEditable) { el.focus(); document.execCommand('insertText', false, t); return; }
+  var s = el.selectionStart == null ? el.value.length : el.selectionStart;
+  var e = el.selectionEnd   == null ? el.value.length : el.selectionEnd;
+  setVal(el, el.value.slice(0, s) + t + el.value.slice(e));
+  el.setSelectionRange(s + t.length, s + t.length);
+  fireInput(el);
 }
 function delBack() {
-  var v = SCR.value, s = SCR.selectionStart, e = SCR.selectionEnd;
-  if (s !== e) { SCR.value = v.slice(0, s) + v.slice(e); SCR.setSelectionRange(s, s); return; }
+  var el = TGT();
+  if (el.isContentEditable) {
+    el.focus();
+    var sel = window.getSelection();
+    if (sel.isCollapsed) sel.modify('move', 'backward', 'character');
+    document.execCommand('forwardDelete');
+    return;
+  }
+  var v = el.value, s = el.selectionStart, e = el.selectionEnd;
+  if (s !== e) { setVal(el, v.slice(0, s) + v.slice(e)); el.setSelectionRange(s, s); fireInput(el); return; }
   if (!s) return;
-  var ch = [...v.slice(0, s)]; ch.pop();                 // รองรับ surrogate pair (อีโมจิไม่พัง)
-  SCR.value = ch.join('') + v.slice(s);
-  SCR.setSelectionRange(s - 1, s - 1);
+  var ch = [...v.slice(0, s)]; ch.pop();
+  setVal(el, ch.join('') + v.slice(s));
+  el.setSelectionRange(s - 1, s - 1);
+  fireInput(el);
 }
 function delFwd() {
-  var v = SCR.value, s = SCR.selectionStart, e = SCR.selectionEnd;
-  if (s !== e) { SCR.value = v.slice(0, s) + v.slice(e); SCR.setSelectionRange(s, s); return; }
+  var el = TGT();
+  if (el.isContentEditable) { el.focus(); document.execCommand('forwardDelete'); return; }
+  var v = el.value, s = el.selectionStart, e = el.selectionEnd;
+  if (s !== e) { setVal(el, v.slice(0, s) + v.slice(e)); el.setSelectionRange(s, s); fireInput(el); return; }
   if (e >= v.length) return;
   var seg = [...v.slice(e)], p = e + seg[0].length;
-  SCR.value = v.slice(0, e) + v.slice(p);
-  SCR.setSelectionRange(e, e);
+  setVal(el, v.slice(0, e) + v.slice(p));
+  el.setSelectionRange(e, e);
+  fireInput(el);
 }
-function move(d) {   // d = -1 ซ้าย / +1 ขวา (ทีละ 1 ตัวอักษร)
-  var v = SCR.value, s = SCR.selectionStart, e = SCR.selectionEnd;
+function move(d) {
+  var el = TGT();
+  if (el.isContentEditable) {
+    el.focus();
+    window.getSelection().modify('move', d < 0 ? 'backward' : 'forward', 'character');
+    return;
+  }
+  var v = el.value, s = el.selectionStart, e = el.selectionEnd;
   if (d < 0) {
-    if (s !== e) { SCR.setSelectionRange(s, s); return; }
+    if (s !== e) { el.setSelectionRange(s, s); return; }
     if (!s) return;
-    var p = [...v.slice(0, s)].slice(0, -1).join('').length;
-    SCR.setSelectionRange(p, p);
+    el.setSelectionRange([...v.slice(0, s)].slice(0, -1).join('').length, [...v.slice(0, s)].slice(0, -1).join('').length);
   } else {
-    if (s !== e) { SCR.setSelectionRange(e, e); return; }
+    if (s !== e) { el.setSelectionRange(e, e); return; }
     if (e >= v.length) return;
     var seg = [...v.slice(e)];
-    SCR.setSelectionRange(e + seg[0].length, e + seg[0].length);
+    el.setSelectionRange(e + seg[0].length, e + seg[0].length);
   }
 }
-function moveLine(d) {   // ลูกศรขึ้น/ลง — คงคอลัมน์ไว้ (ประมาณการต่อบรรทัด)
-  var v = SCR.value, pos = SCR.selectionStart;
+function moveLine(d) {
+  var el = TGT();
+  if (el.isContentEditable) {
+    el.focus();
+    window.getSelection().modify('move', d < 0 ? 'backward' : 'forward', 'line');
+    return;
+  }
+  var v = el.value, pos = el.selectionStart;
   var before = v.slice(0, pos), lineStart = before.lastIndexOf('\n') + 1;
   var col = [...before.slice(lineStart)].length;
   var nl = v.indexOf('\n', pos);
@@ -120,13 +174,13 @@ function moveLine(d) {   // ลูกศรขึ้น/ลง — คงคอ�
     var prevEnd = lineStart - 1, prevStart = v.lastIndexOf('\n', Math.max(0, prevEnd - 1)) + 1;
     var len = [...v.slice(prevStart, prevEnd)].length;
     var p = prevStart + [...v.slice(prevStart, prevStart + Math.min(col, len))].join('').length;
-    SCR.setSelectionRange(p, p);
+    el.setSelectionRange(p, p);
   } else {
     if (nl === -1) return;
     var ns = nl + 1, nn = v.indexOf('\n', ns), ne = nn === -1 ? v.length : nn;
     var len2 = [...v.slice(ns, ne)].length;
     var p2 = ns + [...v.slice(ns, ns + Math.min(col, len2))].join('').length;
-    SCR.setSelectionRange(p2, p2);
+    el.setSelectionRange(p2, p2);
   }
 }
 
@@ -154,7 +208,6 @@ function syncMeta() {
 }
 function toggleLang() { lang = lang === 'th' ? 'en' : 'th'; render(); }
 
-/* กระจาย action ของทุกปุ่ม (ทั้ง click หน้าจอและคีย์บอร์ดจริง) */
 function act(id, def, phys) {
   if (id === 'ShiftL' || id === 'ShiftR') {
     if (phys) { held = true; }
@@ -172,22 +225,21 @@ function act(id, def, phys) {
   if (id === 'Down')  { moveLine(1);  return; }
   if (id === 'Left')  { move(-1); return; }
   if (id === 'Right') { move(1);  return; }
-  if (id === 'Ctrl' || id === 'Win' || id === 'Alt' || id === 'AltGr') return; // ตกแต่ง
+  if (id === 'Ctrl' || id === 'Win' || id === 'Alt' || id === 'AltGr') return;
   if (!def || !def.b) return;
   ins(effChar(def));
   snd(); shiftUsed = true;
-  if (sticky) sticky = false;   // Shift แบบแตะ 1 ครั้ง — พิมพ์ไป 1 ตัวแล้วคืนค่า
+  if (sticky) sticky = false;
   syncMeta();
 }
 
-/* สร้างปุ่ม 1 ปุ่ม + ผูก pointer event + ใส่ hue สำหรับ LED เรนโบว์ */
 var hueCounter = 0;
 function mkBtn(id, base, shift, code, w) {
   var b = document.createElement('button');
   b.className = 'osk-k ' + (w || '');
   b.dataset.id = id;
   if (code) b.dataset.code = code;
-  b.style.setProperty('--h', (hueCounter++ * 14) % 360);   // ไล่สีเรนโบว์ทีละปุ่ม
+  b.style.setProperty('--h', (hueCounter++ * 14) % 360);
   if (base) {
     var sp = document.createElement('span');
     sp.className = 'osk-c';
@@ -201,13 +253,13 @@ function mkBtn(id, base, shift, code, w) {
     b.appendChild(ss);
   }
   b.addEventListener('pointerdown', function (ev) {
-    ev.preventDefault();                       // กัน textarea เสีย focus
+    ev.preventDefault();
     b.classList.add('pressed');
     setTimeout(function () { b.classList.remove('pressed'); }, 130);
     act(id, DEFS[id], false);
   });
   if (id === 'ShiftL' || id === 'ShiftR') {
-    var rel = function () {                    // ปล่อย Shift: ถ้าไม่ได้พิมพ์อะไรเลย = สลับ sticky
+    var rel = function () {
       if (held && !shiftUsed) sticky = !sticky;
       held = false; shiftUsed = false; syncMeta();
     };
@@ -217,7 +269,6 @@ function mkBtn(id, base, shift, code, w) {
   return b;
 }
 
-/* กลุ่มลูกศร (แบบ inverted-T) */
 function arrows() {
   var w = document.createElement('div'); w.className = 'osk-arr';
   var r1 = document.createElement('div'); r1.className = 'osk-arow';
@@ -232,7 +283,6 @@ function arrows() {
   return w;
 }
 
-/* วาดคีย์บอร์ดตามภาษาปัจจุบัน */
 function render() {
   KB.innerHTML = ''; codeMap = {}; DEFS = {}; hueCounter = 0;
   LAY[lang].rows.forEach(function (row) {
@@ -248,11 +298,11 @@ function render() {
   syncMeta();
 }
 
-/* ---------- คีย์บอร์ดจริง: กดแล้วปุ่มบนหน้าจอกะพริบตามตำแหน่งจริง (event.code) ---------- */
+/* คีย์บอร์ดจริง sync กับหน้าจอ */
 document.addEventListener('keydown', function (e) {
-  if (e.ctrlKey || e.metaKey || e.altKey) return;   // ให้ Ctrl+C/V, Alt+... ทำงานปกติ
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
   var b = codeMap[e.code];
-  if (!b) return;                                    // ปุ่มที่ไม่มีบนจอ (Delete, Home...) ให้ native จัดการ
+  if (!b) return;
   e.preventDefault();
   if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
     b.classList.add('pressed');
@@ -272,13 +322,13 @@ document.addEventListener('keyup', function (e) {
   if (b) b.classList.remove('pressed');
   if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
     held = false;
-    if (!shiftUsed) sticky = !sticky;                // แตะ Shift บนคีย์บอร์ดจริง = sticky เหมือนหน้าจอ
+    if (!shiftUsed) sticky = !sticky;
     shiftUsed = false; syncMeta();
   }
 });
 window.addEventListener('blur', function () {
   held = false;
-  KB.querySelectorAll('.pressed').forEach(function (x) { x.classList.remove('pressed'); });
+  if (KB) KB.querySelectorAll('.pressed').forEach(function (x) { x.classList.remove('pressed'); });
 });
 
 /* ---------- init ---------- */
@@ -292,7 +342,8 @@ function injectStyle() {
 function barBtn(label, fn) {
   var b = document.createElement('button');
   b.className = 'osk-btn'; b.textContent = label;
-  b.addEventListener('click', function () { fn(); SCR.focus(); });
+  b.addEventListener('pointerdown', function (ev) { ev.preventDefault(); });  // กัน focus หลุดจากช่องที่จะพิมพ์
+  b.addEventListener('click', function () { fn(); });
   return b;
 }
 function init(opts) {
@@ -300,15 +351,16 @@ function init(opts) {
   injectStyle();
   var container = typeof opts.container === 'string' ? document.querySelector(opts.container) : opts.container;
   if (!container) { console.error('OnScreenKeyboard: ไม่เจอ container'); return; }
-  if (container.dataset.osk) return;                 // กัน init ซ้ำ
+  if (container.dataset.osk) return;
   container.dataset.osk = '1';
+  container.classList.add('osk-wrap');
 
   SCR = typeof opts.output === 'string' ? document.querySelector(opts.output)
       : (opts.output || null);
   if (!SCR) {
     SCR = document.createElement('textarea');
     SCR.className = 'osk-out';
-    SCR.placeholder = 'พิมพ์ที่นี่... / Type here...';
+    SCR.placeholder = 'แตะช่องไหนของเว็บเพื่อพิมพ์ลงนั้น (ถ้าไม่แตะ จะพิมพ์ลงกล่องนี้)';
     container.appendChild(SCR);
   }
   var bar = document.createElement('div'); bar.className = 'osk-bar';
@@ -322,26 +374,26 @@ function init(opts) {
     sndOn = !sndOn;
     BAR.snd.textContent = sndOn ? 'เสียง: เปิด' : 'เสียง: ปิด';
   });
-  BAR.clr  = barBtn('ล้างข้อความ', function () { SCR.value = ''; });
+  BAR.clr  = barBtn('ล้างข้อความ', function () { TGT().value = ''; });
+  BAR.tgt  = document.createElement('span'); BAR.tgt.className = 'osk-tgt';
+  BAR.tgt.textContent = 'พิมพ์ลง: กล่องข้อความของคีย์บอร์ด';
   bar.appendChild(BAR.lang); bar.appendChild(BAR.led);
-  bar.appendChild(BAR.snd);  bar.appendChild(BAR.clr);
+  bar.appendChild(BAR.snd);  bar.appendChild(BAR.clr); bar.appendChild(BAR.tgt);
   container.appendChild(bar);
 
   KB = document.createElement('div'); KB.className = 'osk-kb';
   container.appendChild(KB);
 
   if (opts.lang === 'en') lang = 'en';
-  if (opts.sound === false) { sndOn = false; }
+  if (opts.sound === false) sndOn = false;
   if (opts.led === false) ledOn = false;
   KB.classList.toggle('osk-led', ledOn);
   BAR.led.textContent = ledOn ? 'ไฟ LED: เปิด' : 'ไฟ LED: ปิด';
   if (!sndOn) BAR.snd.textContent = 'เสียง: ปิด';
 
   render();
-  SCR.focus();
 }
 
-/* auto-init: ถ้าหน้าเว็บมี <div id="osk"> หรือ <div id="kb"> อยู่แล้ว */
 function autoInit() {
   var c = document.getElementById('osk') || document.getElementById('kb');
   if (c && !c.dataset.osk) init({ container: c });
@@ -351,4 +403,3 @@ else autoInit();
 
 window.OnScreenKeyboard = { init: init, render: render };
 })();
-  
