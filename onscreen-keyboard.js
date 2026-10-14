@@ -1,13 +1,19 @@
-/* ============================================================
- * On-Screen Keyboard  v1.3  —  ไทย / English (Kedmanee, TIS 820)
- * Vanilla JS, zero dependency
- * v1.3: picker ทะลุ iframe (Scratch และเกมที่ embed) + ส่ง keyCode
- *       ให้ Scratch + กดค้างย้ำปุ่มได้ (key repeat) สำหรับเกม
- * ============================================================ */
+/* ================================================================
+ * On-Screen Keyboard  v2.0 FULL — ไทย/English (Kedmanee, TIS 820)
+ * ================================================================
+ * ฟีเจอร์หลัก:
+ *  [พิมพ์ข้อความ] input/textarea/contenteditable ทั่วไป (รวมใน iframe)
+ *  [🎮 โหมดเกม]   ยิง keydown/keyup ไปทุก same-origin document ในหน้า
+ *                (หน้าหลัก + iframe ซ้อนกัน) — Scratch, canvas เกม ฯลฯ
+ *                กดค้าง = ย้ำอัตโนมัติ (autorepeat) + รองรับหลายนิ้วพร้อมกัน
+ *  [🎯 เล็ง element] crosshair picker (ทะลุ iframe, กลืน click ไม่ให้เกมเห็น)
+ *  ลากย้ายแผงคีย์บอร์ดได้ / ย่อ-ขยาย / ไฟ LED เรนโบว์ / เสียง mechanical
+ * ================================================================ */
 (function () {
 'use strict';
 
-/* ==================== PHASE 1/3 : layout data ==================== */
+/* ==================== PHASE 1: layout data ==================== */
+/* key: [id/event.code, ตัวพิมพ์เล็ก, ตัวพิมพ์ใหญ่(Shift), ความกว้าง] */
 var LAY = {
 en: { rows: [
   [['Backquote','`','~'],['Digit1','1','!'],['Digit2','2','@'],['Digit3','3','#'],['Digit4','4','$'],['Digit5','5','%'],['Digit6','6','^'],['Digit7','7','&'],['Digit8','8','*'],['Digit9','9','('],['Digit0','0',')'],['Minus','-','_'],['Equal','=','+'],['Backspace','\u232B','','osk-w2']],
@@ -24,14 +30,33 @@ th: { rows: [
   [['Ctrl','Ctrl','','osk-w15'],['Win','Win','','osk-w15'],['Alt','Alt','','osk-w15'],['Space','','','osk-w6'],['AltGr','AltGr','','osk-w15'],['Lang','EN','','osk-w175'],['ARR']]
 ]}};
 
-/* ==================== PHASE 2/3 : CSS + state + helpers ==================== */
+/* key meta สำหรับโหมดเกม: id -> [key, code, keyCode, ย้ำได้ไหม] */
+var KEYMETA = {
+  Backspace: ['Backspace', 'Backspace', 8, true],
+  Tab:       ['Tab', 'Tab', 9, false],
+  Enter:     ['Enter', 'Enter', 13, false],
+  Space:     [' ', 'Space', 32, true],
+  Up:        ['ArrowUp', 'ArrowUp', 38, true],
+  Down:      ['ArrowDown', 'ArrowDown', 40, true],
+  Left:      ['ArrowLeft', 'ArrowLeft', 37, true],
+  Right:     ['ArrowRight', 'ArrowRight', 39, true],
+  ShiftL:    ['Shift', 'ShiftLeft', 16, false],
+  ShiftR:    ['Shift', 'ShiftRight', 16, false],
+  Ctrl:      ['Control', 'ControlLeft', 17, false],
+  Alt:       ['Alt', 'AltLeft', 18, false],
+  Win:       ['Meta', 'MetaLeft', 91, false],
+  AltGr:     ['AltGraph', 'AltRight', 225, false]
+};
+
+/* ==================== PHASE 2: CSS + state + helpers ==================== */
 var CSS = `
 .osk-wrap{font-family:'Segoe UI',Tahoma,sans-serif;width:100%;max-width:980px}
-.osk-bar{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center}
-.osk-btn{border:1px solid #c9c9cf;background:#fff;border-radius:8px;padding:8px 14px;font-size:14px;cursor:pointer;color:#222}
+.osk-bar{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center;cursor:move;padding:2px}
+.osk-btn{border:1px solid #c9c9cf;background:#fff;border-radius:8px;padding:8px 14px;font-size:14px;cursor:pointer;color:#222;flex:none}
 .osk-btn:hover{background:#f0f0f3}
 .osk-btn.on{background:#1a73e8;color:#fff;border-color:#1a73e8}
-.osk-tgt{margin-left:auto;font-size:12px;color:#888;font-style:italic}
+.osk-btn.game-on{background:#188038;color:#fff;border-color:#188038}
+.osk-tgt{margin-left:auto;font-size:12px;color:#888;font-style:italic;max-width:42%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:default}
 .osk-out{width:100%;box-sizing:border-box;border:1px solid #c9c9cf;border-radius:12px;background:#fff;padding:12px 14px;font-size:18px;min-height:88px;resize:vertical;margin-bottom:12px;font-family:inherit;color:#222}
 .osk-kb{background:#202024;border-radius:16px;padding:14px;box-shadow:0 8px 24px rgba(0,0,0,.25)}
 .osk-row{display:flex;gap:8px;margin-bottom:8px}
@@ -53,12 +78,14 @@ var CSS = `
 `;
 
 /* ---------- state ---------- */
-var SCR = null, KB = null, BAR = {}, activeEl = null;
+var SCR = null, KB = null, BAR = {}, activeEl = null, ROOT = null;
 var lang = 'th', caps = false, held = false, sticky = false, shiftUsed = false;
 var sndOn = true, ledOn = true, ac = null, codeMap = {}, DEFS = {};
-var picking = false, hl = null, hookedDocs = [], repeatTimer = null;
+var picking = false, hl = null, hookedDocs = [];
+var gameMode = false;                       // 🎮 โหมดเกม: broadcast ทุก doc
+var heldKeys = {}, heldMeta = {}, repeatTimers = {};   // รองรับหลายปุ่มค้างพร้อมกัน
 
-/* ---------- เป้าหมายการพิมพ์ ---------- */
+/* ---------- เป้าหมายการพิมพ์ (โหมดพิมพ์ข้อความ) ---------- */
 function isTypeable(el) {
   if (!el) return false;
   if (el.isContentEditable) return true;
@@ -72,52 +99,135 @@ function isTypeable(el) {
 }
 function typeableTarget() { return isTypeable(activeEl) ? activeEl : null; }
 function TGT() { return typeableTarget() || SCR; }
-function isGameMode() { return !typeableTarget() && activeEl && activeEl !== SCR; }
 function targetName(el) {
   if (!el) return '—';
-  if (el === SCR) return 'กระดานโน้ตของคีย์บอร์ด';
+  if (el === SCR) return 'กระดานโน้ต';
   var n = '<' + el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + '>';
   if (el.tagName === 'IFRAME') {
-    try { if (el.contentDocument) n += ' (iframe)'; else n = '⚠ iframe ข้ามโดเมน — ส่ง key ไม่ถึง'; }
-    catch (e) { n = '⚠ iframe ข้ามโดเมน — ส่ง key ไม่ถึง'; }
+    try { if (el.contentDocument) n += ' (iframe)'; else n = '⚠ iframe ข้ามโดเมน'; }
+    catch (e) { n = '⚠ iframe ข้ามโดเมน'; }
   }
   return n;
 }
+function statusSet(t) { if (BAR.tgt) BAR.tgt.textContent = t; }
 function setTarget(el) {
   activeEl = el;
-  if (BAR.tgt) BAR.tgt.textContent = 'พิมพ์ลง: ' + targetName(el) + (isTypeable(el) ? '' : ' (ส่ง key event)');
+  statusSet('พิมพ์ลง: ' + targetName(el) + (isTypeable(el) ? '' : ' (ส่ง key)'));
 }
 
-/* ---------- ทะลุ iframe: หา element จริงที่ (x,y) แม้อยู่ใน iframe ซ้อนกัน ---------- */
+/* ---------- 🎮 GAME CORE: เก็บทุก same-origin document ในหน้า ---------- */
+function collectDocs() {
+  var docs = [], cross = 0, seen = [];
+  (function walk(doc) {
+    if (!doc || seen.indexOf(doc) >= 0) return;
+    seen.push(doc); docs.push(doc);
+    var fr;
+    try { fr = doc.querySelectorAll('iframe'); } catch (e) { return; }
+    for (var i = 0; i < fr.length; i++) {
+      try {
+        var d = fr[i].contentDocument;
+        if (d) walk(d); else cross++;
+      } catch (e) { cross++; }
+    }
+  })(document);
+  return { docs: docs, cross: cross };
+}
+
+/* ยิง event ไป doc หนึ่ง ๆ (keydown [+keypress] [+keyup]) */
+function fireInDoc(doc, opts, withKeyUp, printable) {
+  var W;
+  try { W = doc.defaultView; } catch (e) { return; }
+  if (!W) return;
+  var t = doc.body || doc.documentElement;
+  if (!t) return;
+  try {
+    t.dispatchEvent(new W.KeyboardEvent('keydown', opts));
+    if (printable) {
+      t.dispatchEvent(new W.KeyboardEvent('keypress', {
+        key: opts.key, charCode: opts.keyCode, keyCode: opts.keyCode, which: opts.keyCode,
+        bubbles: true, cancelable: true
+      }));
+    }
+    if (withKeyUp) t.dispatchEvent(new W.KeyboardEvent('keyup', opts));
+  } catch (e) {}
+}
+function broadcast(opts, withKeyUp, printable) {
+  var c = collectDocs();
+  for (var i = 0; i < c.docs.length; i++) fireInDoc(c.docs[i], opts, withKeyUp, printable);
+  return c;
+}
+
+function metaOf(id, def) {
+  if (def && def.b && def.b.length === 1) {
+    var k = effChar(def);
+    return { key: k, code: id, kc: k.toUpperCase().charCodeAt(0), repeat: true };
+  }
+  var m = KEYMETA[id];
+  if (!m) return null;
+  return { key: m[0], code: m[1], kc: m[2], repeat: m[3] };
+}
+function gameKeyDown(id, def) {
+  if (heldKeys[id]) return;                  // กัน keydown ซ้ำ (repeat/หลายนิ้ว)
+  var meta = metaOf(id, def);
+  if (!meta) return;
+  heldKeys[id] = true; heldMeta[id] = meta;
+  var opts = { key: meta.key, code: meta.code, keyCode: meta.kc, which: meta.kc, bubbles: true, cancelable: true };
+  var printable = meta.key.length === 1;
+  var c = broadcast(opts, false, printable); // กดค้าง: ส่งเฉพาะ keydown ก่อน (keyup ตอนปล่อย)
+  statusSet('➜ ' + (meta.key === ' ' ? 'Space' : meta.key) + ' → ' + c.docs.length + ' doc' + (c.cross ? ' ⚠cross:' + c.cross : ''));
+  snd();
+  if (meta.repeat) {
+    (function (o, p, docs) {
+      repeatTimers[id] = setInterval(function () {
+        for (var i = 0; i < docs.length; i++) fireInDoc(docs[i], o, false, p);
+      }, 120);
+    })(opts, printable, c.docs.slice());
+  }
+}
+function gameKeyUp(id) {
+  if (!heldKeys[id]) return;
+  heldKeys[id] = false;
+  if (repeatTimers[id]) { clearInterval(repeatTimers[id]); delete repeatTimers[id]; }
+  var meta = heldMeta[id];
+  delete heldMeta[id];
+  if (!meta) return;
+  var opts = { key: meta.key, code: meta.code, keyCode: meta.kc, which: meta.kc, bubbles: true, cancelable: true };
+  broadcast(opts, true, false);
+}
+function stopAllRepeats() {
+  Object.keys(repeatTimers).forEach(function (id) {
+    clearInterval(repeatTimers[id]); delete repeatTimers[id];
+  });
+  heldKeys = {}; heldMeta = {};
+}
+
+/* ---------- 🎯 crosshair picker (ทะลุ iframe, กลืน click) ---------- */
 function pierceTarget(doc, x, y) {
   var el = doc.elementFromPoint(x, y);
-  while (el && el.tagName === 'IFRAME') {
+  var guard = 0;
+  while (el && el.tagName === 'IFRAME' && guard++ < 10) {
     var d;
-    try { d = el.contentDocument; } catch (e) { d = null; }   // cross-origin
+    try { d = el.contentDocument; } catch (e) { d = null; }
     if (!d) return el;
     var r = el.getBoundingClientRect();
-    var ix = (x - r.left) * (d.documentElement.clientWidth  / r.width);
-    var iy = (y - r.top)  * (d.documentElement.clientHeight / r.height);
-    x = ix; y = iy; doc = d;
+    x = (x - r.left) * (d.documentElement.clientWidth  / r.width);
+    y = (y - r.top)  * (d.documentElement.clientHeight / r.height);
+    doc = d;
     el = d.elementFromPoint(x, y);
   }
   return el;
 }
-/* ตำแหน่งกรอบไฮไลต์แบบ absolute (รวม offset ของ iframe ทุกชั้น) */
 function absRect(el) {
   var r = el.getBoundingClientRect();
   var out = { left: r.left, top: r.top, width: r.width, height: r.height };
-  var win = el.ownerDocument.defaultView;
-  var guard = 0;
-  while (win && win.frameElement && guard++ < 10) {
+  var win = el.ownerDocument.defaultView, g = 0;
+  while (win && win.frameElement && g++ < 10) {
     var fr = win.frameElement.getBoundingClientRect();
     out.left += fr.left; out.top += fr.top;
     win = win.parent;
   }
   return out;
 }
-
-/* ---------- hook document ของ iframe (same-origin) เพื่อให้ pick/เล็งทำงานข้างในได้ ---------- */
 function hookDoc(doc) {
   if (!doc || hookedDocs.indexOf(doc) >= 0) return;
   hookedDocs.push(doc);
@@ -141,16 +251,15 @@ function hookDoc(doc) {
   }, true);
 }
 function hookIframesDeep(doc) {
-  var iframes = doc.querySelectorAll('iframe');
-  for (var i = 0; i < iframes.length; i++) {
+  var fr;
+  try { fr = doc.querySelectorAll('iframe'); } catch (e) { return; }
+  for (var i = 0; i < fr.length; i++) {
     try {
-      var d = iframes[i].contentDocument;
+      var d = fr[i].contentDocument;
       if (d) { hookDoc(d); hookIframesDeep(d); }
     } catch (e) {}
   }
 }
-
-/* ---------- โหมด "เล็ง element" ---------- */
 function showHl(el) {
   if (!hl) {
     hl = document.createElement('div');
@@ -161,7 +270,7 @@ function showHl(el) {
   hl.style.display = 'block';
   hl.style.left = (r.left - 3) + 'px'; hl.style.top = (r.top - 3) + 'px';
   hl.style.width = (r.width + 6) + 'px'; hl.style.height = (r.height + 6) + 'px';
-  if (BAR.tgt) BAR.tgt.textContent = 'เล็ง: ' + targetName(el);
+  statusSet('เล็ง: ' + targetName(el));
 }
 function hideHl() { if (hl) hl.style.display = 'none'; }
 function pickMove(doc, x, y) {
@@ -176,7 +285,7 @@ function togglePick(force) {
   picking = force !== undefined ? force : !picking;
   if (BAR.pick) BAR.pick.classList.toggle('on', picking);
   document.documentElement.style.cursor = picking ? 'crosshair' : '';
-  if (picking) hookIframesDeep(document);   // เตรียม hook iframe ทุกตัว (Scratch embed ฯลฯ)
+  if (picking) hookIframesDeep(document);
   else hideHl();
 }
 document.addEventListener('mousemove', function (e) { if (picking) pickMove(document, e.clientX, e.clientY); }, true);
@@ -196,40 +305,7 @@ document.addEventListener('keydown', function (e) {
   if (picking && e.key === 'Escape') { e.stopPropagation(); togglePick(false); }
 }, true);
 
-/* ---------- ส่ง key event จำลอง (เกม canvas/div/iframe) ---------- */
-var KEYMAP = {   // id: [key, code, keyCode]
-  Backspace: ['Backspace', 'Backspace', 8], Tab: ['Tab', 'Tab', 9],
-  Enter: ['Enter', 'Enter', 13], Space: [' ', 'Space', 32],
-  Up: ['ArrowUp', 'ArrowUp', 38], Down: ['ArrowDown', 'ArrowDown', 40],
-  Left: ['ArrowLeft', 'ArrowLeft', 37], Right: ['ArrowRight', 'ArrowRight', 39],
-  ShiftL: ['Shift', 'ShiftLeft', 16], ShiftR: ['Shift', 'ShiftRight', 16]
-};
-function dispatchKey(id, def) {
-  var el = activeEl;
-  if (!el) return;
-  if (el.tagName === 'IFRAME') {   // เล็งโดนตัว iframe เอง → ยิงเข้าไปข้างใน
-    try {
-      if (el.contentDocument) el = pierceTarget(el.contentDocument,
-        el.contentDocument.documentElement.clientWidth / 2,
-        el.contentDocument.documentElement.clientHeight / 2) || el.contentDocument.body;
-    } catch (e) { return; }
-  }
-  var key, code, kc = 0;
-  if (def && def.b && def.b.length === 1) { key = effChar(def); code = id; kc = key.toUpperCase().charCodeAt(0); }
-  else if (KEYMAP[id]) { key = KEYMAP[id][0]; code = KEYMAP[id][1]; kc = KEYMAP[id][2]; }
-  else return;
-  var opts = { key: key, code: code, keyCode: kc, which: kc, bubbles: true, cancelable: true };
-  var W = el.ownerDocument.defaultView || window;   // KeyboardEvent ต้องสร้างจาก window ของ realm นั้น
-  el.dispatchEvent(new W.KeyboardEvent('keydown', opts));
-  setTimeout(function () { el.dispatchEvent(new W.KeyboardEvent('keyup', opts)); }, 60);
-}
-function startRepeat(id, def) {
-  stopRepeat();
-  repeatTimer = setInterval(function () { dispatchKey(id, def); }, 120);   // กดค้าง = ย้ำทุก 120ms
-}
-function stopRepeat() { if (repeatTimer) { clearInterval(repeatTimer); repeatTimer = null; } }
-
-/* focus ปกติ (คลิกช่องข้อความโดยตรง) */
+/* focus ปกติ */
 document.addEventListener('focusin', function (e) {
   if (!SCR) return;
   if (KB && KB.contains(e.target)) return;
@@ -237,7 +313,7 @@ document.addEventListener('focusin', function (e) {
   if (isTypeable(e.target)) setTarget(e.target);
 });
 
-/* ---------- helpers: ตัวอักษร / แทรก / ลบ / เลื่อน (โหมดพิมพ์ข้อความ) ---------- */
+/* ---------- helpers โหมดพิมพ์ข้อความ ---------- */
 function shiftActive() { return held || sticky; }
 function effChar(def) {
   var sh = shiftActive();
@@ -275,17 +351,6 @@ function delBack() {
   el.setSelectionRange(s - 1, s - 1);
   fireInput(el);
 }
-function delFwd() {
-  var el = TGT();
-  if (el.isContentEditable) { el.focus(); document.execCommand('forwardDelete'); return; }
-  var v = el.value, s = el.selectionStart, e = el.selectionEnd;
-  if (s !== e) { setVal(el, v.slice(0, s) + v.slice(e)); el.setSelectionRange(s, s); fireInput(el); return; }
-  if (e >= v.length) return;
-  var seg = [...v.slice(e)], p = e + seg[0].length;
-  setVal(el, v.slice(0, e) + v.slice(p));
-  el.setSelectionRange(e, e);
-  fireInput(el);
-}
 function move(d) {
   var el = TGT();
   if (el.isContentEditable) {
@@ -297,7 +362,8 @@ function move(d) {
   if (d < 0) {
     if (s !== e) { el.setSelectionRange(s, s); return; }
     if (!s) return;
-    el.setSelectionRange([...v.slice(0, s)].slice(0, -1).join('').length, [...v.slice(0, s)].slice(0, -1).join('').length);
+    var p = [...v.slice(0, s)].slice(0, -1).join('').length;
+    el.setSelectionRange(p, p);
   } else {
     if (s !== e) { el.setSelectionRange(e, e); return; }
     if (e >= v.length) return;
@@ -345,30 +411,41 @@ function snd() {
   } catch (e) {}
 }
 
-/* ==================== PHASE 3/3 : render + events + init ==================== */
+/* ==================== PHASE 3: render + events + init ==================== */
 function syncMeta() {
   KB.querySelectorAll('[data-id="ShiftL"],[data-id="ShiftR"]').forEach(function (b) { b.classList.toggle('on', shiftActive()); });
   KB.querySelectorAll('[data-id="Caps"]').forEach(function (b) { b.classList.toggle('on', caps); });
   BAR.lang.textContent = lang === 'th' ? 'ไทย' : 'EN';
+  if (BAR.game) {
+    BAR.game.classList.toggle('game-on', gameMode);
+    BAR.game.textContent = gameMode ? '🎮 เกม: เปิด' : '🎮 เกม: ปิด';
+  }
 }
 function toggleLang() { lang = lang === 'th' ? 'en' : 'th'; render(); }
+function toggleGame(force) {
+  gameMode = force !== undefined ? force : !gameMode;
+  if (!gameMode) stopAllRepeats();
+  if (gameMode) {
+    var c = collectDocs();
+    statusSet('🎮 โหมดเกม: ยิง key ไป ' + c.docs.length + ' doc' + (c.cross ? ' (⚠ cross-origin ' + c.cross + ' ตัว ส่งไม่ถึง)' : ''));
+  } else {
+    statusSet('โหมดพิมพ์ข้อความ: แตะช่องที่จะพิมพ์ หรือกด 🎯 เล็ง element');
+  }
+  syncMeta();
+}
 function afterKey() { snd(); shiftUsed = true; if (sticky) sticky = false; syncMeta(); }
 
-function act(id, def, phys) {
+function pressDown(id, def, phys) {          // กดปุ่มลง (pointer หรือคีย์บอร์ดจริง)
   if (id === 'Lang') { toggleLang(); return; }
-
-  /* โหมดเกม: เป้าหมายพิมพ์ไม่ได้ (canvas/div ใน iframe) → ส่ง key event */
-  if (isGameMode()) {
+  if (gameMode) {
+    if (id === 'Caps') { caps = !caps; syncMeta(); return; }
     if (id === 'ShiftL' || id === 'ShiftR') {
       if (phys) held = true; else if (held) shiftUsed = true; else { held = true; shiftUsed = false; }
-      syncMeta(); dispatchKey(id, null); return;
+      syncMeta();
     }
-    if (id === 'Caps') { caps = !caps; syncMeta(); return; }
-    dispatchKey(id, def);
-    afterKey();
+    gameKeyDown(id, def);
     return;
   }
-
   if (id === 'ShiftL' || id === 'ShiftR') {
     if (phys) { held = true; }
     else if (held) { shiftUsed = true; } else { held = true; shiftUsed = false; }
@@ -387,6 +464,21 @@ function act(id, def, phys) {
   if (!def || !def.b) return;
   ins(effChar(def));
   afterKey();
+}
+function pressUp(id) {                        // ปล่อยปุ่ม
+  if (gameMode) {
+    if (id === 'ShiftL' || id === 'ShiftR') {
+      gameKeyUp(id);
+      held = false; shiftUsed = false; syncMeta();
+      return;
+    }
+    gameKeyUp(id);
+    return;
+  }
+  if (id === 'ShiftL' || id === 'ShiftR') {
+    if (held && !shiftUsed) sticky = !sticky;
+    held = false; shiftUsed = false; syncMeta();
+  }
 }
 
 var hueCounter = 0;
@@ -411,25 +503,15 @@ function mkBtn(id, base, shift, code, w) {
   b.addEventListener('pointerdown', function (ev) {
     ev.preventDefault();
     b.classList.add('pressed');
-    setTimeout(function () { b.classList.remove('pressed'); }, 130);
-    act(id, DEFS[id], false);
-    /* โหมดเกม: กดค้าง = ย้ำปุ่ม (เดินต่อได้) */
-    if (isGameMode() && id !== 'ShiftL' && id !== 'ShiftR' && id !== 'Caps' && id !== 'Lang') {
-      startRepeat(id, DEFS[id]);
-    }
+    pressDown(id, DEFS[id], false);
   });
-  var stop = function () { stopRepeat(); };
-  b.addEventListener('pointerup', stop);
-  b.addEventListener('pointercancel', stop);
-  b.addEventListener('pointerleave', stop);
-  if (id === 'ShiftL' || id === 'ShiftR') {
-    var rel = function () {
-      if (held && !shiftUsed) sticky = !sticky;
-      held = false; shiftUsed = false; syncMeta();
-    };
-    b.addEventListener('pointerup', rel);
-    b.addEventListener('pointercancel', rel);
-  }
+  var up = function () {
+    b.classList.remove('pressed');
+    pressUp(id);
+  };
+  b.addEventListener('pointerup', up);
+  b.addEventListener('pointercancel', up);
+  b.addEventListener('pointerleave', up);
   return b;
 }
 
@@ -464,34 +546,23 @@ function render() {
 
 /* คีย์บอร์ดจริง sync กับหน้าจอ */
 document.addEventListener('keydown', function (e) {
+  if (!e.isTrusted) return;                    // กัน event จำลองของตัวเองวนลูป
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   var b = codeMap[e.code];
   if (!b) return;
   e.preventDefault();
-  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
-    b.classList.add('pressed');
-    if (!e.repeat) act('ShiftL', null, true);
-    syncMeta(); return;
-  }
-  if (e.code === 'CapsLock') {
-    b.classList.add('pressed');
-    if (!e.repeat) act('Caps');
-    return;
-  }
   b.classList.add('pressed');
-  act(b.dataset.id, DEFS[b.dataset.id], true);
+  if (e.code === 'CapsLock') { if (!e.repeat) pressDown('Caps', null, true); return; }
+  pressDown(b.dataset.id, DEFS[b.dataset.id], true);
 });
 document.addEventListener('keyup', function (e) {
+  if (!e.isTrusted) return;
   var b = codeMap[e.code];
   if (b) b.classList.remove('pressed');
-  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
-    held = false;
-    if (!shiftUsed) sticky = !sticky;
-    shiftUsed = false; syncMeta();
-  }
+  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') pressUp('ShiftL');
 });
 window.addEventListener('blur', function () {
-  held = false; stopRepeat();
+  held = false; stopAllRepeats();
   if (KB) KB.querySelectorAll('.pressed').forEach(function (x) { x.classList.remove('pressed'); });
 });
 
@@ -503,10 +574,10 @@ function injectStyle() {
   st.textContent = CSS;
   document.head.appendChild(st);
 }
-function barBtn(label, fn) {
+function barBtn(label, fn, stopProp) {
   var b = document.createElement('button');
   b.className = 'osk-btn'; b.textContent = label;
-  b.addEventListener('pointerdown', function (ev) { ev.preventDefault(); });
+  b.addEventListener('pointerdown', function (ev) { ev.preventDefault(); if (stopProp !== false) ev.stopPropagation(); });
   b.addEventListener('click', function () { fn(); });
   return b;
 }
@@ -518,17 +589,19 @@ function init(opts) {
   if (container.dataset.osk) return;
   container.dataset.osk = '1';
   container.classList.add('osk-wrap');
+  ROOT = container;
 
   SCR = typeof opts.output === 'string' ? document.querySelector(opts.output)
       : (opts.output || null);
   if (!SCR) {
     SCR = document.createElement('textarea');
     SCR.className = 'osk-out';
-    SCR.placeholder = 'แตะช่องข้อความ หรือกด 🎯 เล็ง element แล้วคลิกที่ตัวเกมได้เลย (ทะลุ iframe)...';
+    SCR.placeholder = '🎮 โหมดเกม: กดปุ่มได้เลย (ยิงไปทุกจอ) • พิมพ์ข้อความ: แตะช่อง หรือ 🎯 เล็ง element';
     container.appendChild(SCR);
   }
   var bar = document.createElement('div'); bar.className = 'osk-bar';
   BAR.lang = barBtn('ไทย', toggleLang);
+  BAR.game = barBtn('🎮 เกม: ปิด', function () { toggleGame(); });
   BAR.pick = barBtn('🎯 เล็ง element', function () { togglePick(); });
   BAR.led  = barBtn('ไฟ LED: เปิด', function () {
     ledOn = !ledOn;
@@ -539,15 +612,63 @@ function init(opts) {
     sndOn = !sndOn;
     BAR.snd.textContent = sndOn ? 'เสียง: เปิด' : 'เสียง: ปิด';
   });
-  BAR.clr  = barBtn('ล้างข้อความ', function () { TGT().value = ''; });
+  BAR.clr  = barBtn('ล้าง', function () { var t = TGT(); if (t.value !== undefined) t.value = ''; });
+  BAR.min  = barBtn('— ย่อ', function () {
+    var hide = SCR.style.display !== 'none';
+    SCR.style.display = hide ? 'none' : '';
+    KB.style.display = hide ? 'none' : '';
+    BAR.min.textContent = hide ? '▢ ขยาย' : '— ย่อ';
+  });
+  BAR.close = barBtn('✕', function () {
+    stopAllRepeats(); togglePick(false);
+    container.remove();
+    delete container.dataset.osk;
+  });
   BAR.tgt  = document.createElement('span'); BAR.tgt.className = 'osk-tgt';
-  BAR.tgt.textContent = 'พิมพ์ลง: กล่องข้อความของคีย์บอร์ด';
-  bar.appendChild(BAR.lang); bar.appendChild(BAR.pick); bar.appendChild(BAR.led);
-  bar.appendChild(BAR.snd);  bar.appendChild(BAR.clr); bar.appendChild(BAR.tgt);
+  BAR.tgt.textContent = 'พร้อมใช้งาน';
+  bar.appendChild(BAR.lang); bar.appendChild(BAR.game); bar.appendChild(BAR.pick);
+  bar.appendChild(BAR.led);  bar.appendChild(BAR.snd);  bar.appendChild(BAR.clr);
+  bar.appendChild(BAR.min);  bar.appendChild(BAR.close); bar.appendChild(BAR.tgt);
   container.appendChild(bar);
 
   KB = document.createElement('div'); KB.className = 'osk-kb';
   container.appendChild(KB);
+
+  /* ลากย้ายแผงคีย์บอร์ด (pointer capture) */
+  var drag = null;
+  bar.addEventListener('pointerdown', function (ev) {
+    if (ev.target.closest && ev.target.closest('.osk-btn')) return;
+    ev.preventDefault();
+    var cs = getComputedStyle(container);
+    if (cs.position !== 'fixed') container.style.position = 'fixed';
+    var r = container.getBoundingClientRect();
+    container.style.left = r.left + 'px';
+    container.style.top = r.top + 'px';
+    container.style.bottom = 'auto';
+    container.style.transform = 'none';
+    drag = { dx: ev.clientX - r.left, dy: ev.clientY - r.top };
+    bar.setPointerCapture(ev.pointerId);
+  });
+  bar.addEventListener('pointermove', function (ev) {
+    if (!drag) return;
+    var x = ev.clientX - drag.dx, y = ev.clientY - drag.dy;
+    x = Math.max(0, Math.min(window.innerWidth - 80, x));
+    y = Math.max(0, Math.min(window.innerHeight - 60, y));
+    container.style.left = x + 'px';
+    container.style.top = y + 'px';
+  });
+  bar.addEventListener('pointerup', function () {
+    drag = null;
+    try { localStorage.setItem('osk-pos', JSON.stringify({ l: container.style.left, t: container.style.top })); } catch (e) {}
+  });
+  try {
+    var saved = JSON.parse(localStorage.getItem('osk-pos') || 'null');
+    if (saved && saved.l) {
+      container.style.position = 'fixed';
+      container.style.left = saved.l; container.style.top = saved.t;
+      container.style.bottom = 'auto'; container.style.transform = 'none';
+    }
+  } catch (e) {}
 
   if (opts.lang === 'en') lang = 'en';
   if (opts.sound === false) sndOn = false;
@@ -557,6 +678,8 @@ function init(opts) {
   if (!sndOn) BAR.snd.textContent = 'เสียง: ปิด';
 
   render();
+  hookIframesDeep(document);      // hook iframe ล่วงหน้าเลย (focus/pick ข้างในได้)
+  toggleGame(opts.game !== false);  // default: เปิดโหมดเกม (bookmarklet ส่งมา)
 }
 
 function autoInit() {
@@ -566,5 +689,5 @@ function autoInit() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', autoInit);
 else autoInit();
 
-window.OnScreenKeyboard = { init: init, render: render, pick: togglePick };
+window.OnScreenKeyboard = { init: init, render: render, pick: togglePick, game: toggleGame };
 })();
