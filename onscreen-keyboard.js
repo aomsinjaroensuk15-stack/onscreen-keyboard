@@ -1,8 +1,8 @@
 /* ============================================================
- * On-Screen Keyboard  v1.1  —  ไทย / English (Kedmanee, TIS 820)
+ * On-Screen Keyboard  v1.2  —  ไทย / English (Kedmanee, TIS 820)
  * Vanilla JS, zero dependency (inject CSS เอง)
- * v1.1: แป้นหนาขึ้น + พิมพ์ลง element ที่แตะล่าสุด (input/textarea/contenteditable)
- *
+ * v1.2: + โหมด "เล็ง element" (crosshair picker) — สำหรับเกมที่กดเพื่อ focus ไม่ได้
+ *       + ถ้าเป้าหมายพิมพ์ไม่ได้ (canvas/div) จะส่ง KeyboardEvent จำลองให้แทน
  * วิธีใช้:
  *   <div id="kb"></div>
  *   <script src="onscreen-keyboard.js"></script>
@@ -34,6 +34,7 @@ var CSS = `
 .osk-bar{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center}
 .osk-btn{border:1px solid #c9c9cf;background:#fff;border-radius:8px;padding:8px 14px;font-size:14px;cursor:pointer;color:#222}
 .osk-btn:hover{background:#f0f0f3}
+.osk-btn.on{background:#1a73e8;color:#fff;border-color:#1a73e8}
 .osk-tgt{margin-left:auto;font-size:12px;color:#888;font-style:italic}
 .osk-out{width:100%;box-sizing:border-box;border:1px solid #c9c9cf;border-radius:12px;background:#fff;padding:12px 14px;font-size:18px;min-height:88px;resize:vertical;margin-bottom:12px;font-family:inherit;color:#222}
 .osk-kb{background:#202024;border-radius:16px;padding:14px;box-shadow:0 8px 24px rgba(0,0,0,.25)}
@@ -59,8 +60,9 @@ var CSS = `
 var SCR = null, KB = null, BAR = {}, activeEl = null;
 var lang = 'th', caps = false, held = false, sticky = false, shiftUsed = false;
 var sndOn = true, ledOn = true, ac = null, codeMap = {}, DEFS = {};
+var picking = false, hl = null;
 
-/* ---------- focus tracking: จำ element ที่ผู้ใช้แตะ/คลิกล่าสุด ---------- */
+/* ---------- เป้าหมายการพิมพ์ ---------- */
 function isTypeable(el) {
   if (!el) return false;
   if (el.isContentEditable) return true;
@@ -72,21 +74,85 @@ function isTypeable(el) {
   }
   return false;
 }
-function TGT() { return isTypeable(activeEl) ? activeEl : SCR; }
+function typeableTarget() { return isTypeable(activeEl) ? activeEl : null; }
+function TGT() { return typeableTarget() || SCR; }
 function targetName(el) {
   if (!el) return '—';
   if (el === SCR) return 'กระดานโน้ตของคีย์บอร์ด';
   return '<' + el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + '>';
 }
+function setTarget(el) {
+  activeEl = el;
+  if (BAR.tgt) BAR.tgt.textContent = 'พิมพ์ลง: ' + targetName(el) + (isTypeable(el) ? '' : ' (ส่ง key event)');
+}
+
+/* จับ focus ปกติ (คลิก/แตะช่องข้อความโดยตรง) */
 document.addEventListener('focusin', function (e) {
   if (!SCR) return;
-  if (KB && KB.contains(e.target)) return;          // focus ในตัวคีย์บอร์ดเอง — ไม่สน
+  if (KB && KB.contains(e.target)) return;
   if (e.target.closest && e.target.closest('.osk-wrap')) return;
-  if (isTypeable(e.target)) {
-    activeEl = e.target;
-    if (BAR.tgt) BAR.tgt.textContent = 'พิมพ์ลง: ' + targetName(activeEl);
-  }
+  if (isTypeable(e.target)) setTarget(e.target);
 });
+
+/* ---------- โหมด "เล็ง element": crosshair picker ---------- */
+function showHl(el) {
+  if (!hl) {
+    hl = document.createElement('div');
+    hl.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;border:2px solid #1a73e8;background:rgba(26,115,232,.15);border-radius:4px;transition:all .05s';
+    document.body.appendChild(hl);
+  }
+  var r = el.getBoundingClientRect();
+  hl.style.display = 'block';
+  hl.style.left = (r.left - 3) + 'px'; hl.style.top = (r.top - 3) + 'px';
+  hl.style.width = (r.width + 6) + 'px'; hl.style.height = (r.height + 6) + 'px';
+  if (BAR.tgt) BAR.tgt.textContent = 'เล็ง: ' + targetName(el);
+}
+function hideHl() { if (hl) hl.style.display = 'none'; }
+function togglePick(force) {
+  picking = force !== undefined ? force : !picking;
+  if (BAR.pick) BAR.pick.classList.toggle('on', picking);
+  document.documentElement.style.cursor = picking ? 'crosshair' : '';
+  if (!picking) hideHl();
+}
+document.addEventListener('mousemove', function (e) {
+  if (!picking) return;
+  var el = document.elementFromPoint(e.clientX, e.clientY);
+  if (el && (!hl || el !== hl)) showHl(el);
+}, true);
+document.addEventListener('scroll', function () { if (picking) hideHl(); }, true);
+/* กลืน mousedown/click ขณะเล็ง — เกมจะไม่เห็นการคลิกนี้ (ตัวละครไม่ขยับ) */
+['mousedown', 'pointerdown', 'click'].forEach(function (type) {
+  document.addEventListener(type, function (e) {
+    if (!picking) return;
+    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+    if (type !== 'click') return;
+    var el = document.elementFromPoint(e.clientX, e.clientY) || e.target;
+    if (el.closest && el.closest('.osk-wrap')) { togglePick(false); return; }  // คลิกพลาดในแป้นตัวเอง = ยกเลิก
+    setTarget(el);
+    togglePick(false);
+  }, true);
+});
+document.addEventListener('keydown', function (e) {
+  if (picking && e.key === 'Escape') { e.stopPropagation(); togglePick(false); }
+}, true);
+
+/* ---------- ส่ง key event จำลอง (สำหรับเกม canvas/div ที่พิมพ์ไม่ได้) ---------- */
+var KEYMAP = {
+  Backspace: ['Backspace', 'Backspace'], Enter: ['Enter', 'Enter'], Tab: ['Tab', 'Tab'],
+  Space: [' ', 'Space'], Up: ['ArrowUp', 'ArrowUp'], Down: ['ArrowDown', 'ArrowDown'],
+  Left: ['ArrowLeft', 'ArrowLeft'], Right: ['ArrowRight', 'ArrowRight']
+};
+function dispatchKey(id, def) {
+  if (!activeEl) return;
+  var key, code;
+  if (def && def.b && def.b.length === 1) { key = effChar(def); code = id; }  // id = event.code เช่น KeyQ/Digit1
+  else if (KEYMAP[id]) { key = KEYMAP[id][0]; code = KEYMAP[id][1]; }
+  else return;
+  var opts = { key: key, code: code, bubbles: true, cancelable: true };
+  if (key.length === 1) { opts.keyCode = opts.which = key.toUpperCase().charCodeAt(0); }
+  activeEl.dispatchEvent(new KeyboardEvent('keydown', opts));
+  setTimeout(function () { activeEl.dispatchEvent(new KeyboardEvent('keyup', opts)); }, 60);
+}
 
 /* ---------- helpers: ตัวอักษรที่จะพิมพ์ ---------- */
 function shiftActive() { return held || sticky; }
@@ -96,8 +162,8 @@ function effChar(def) {
   return sh ? (def.s || def.b) : def.b;
 }
 
-/* ---------- helpers: แทรก/ลบ/เลื่อนเคอร์เซอร์ (ทั้ง textarea/input และ contenteditable) ---------- */
-function setVal(el, v) {   // native setter — ให้ React/Vue/Angular ตรวจจับการเปลี่ยนค่าได้
+/* ---------- helpers: แทรก/ลบ/เลื่อนเคอร์เซอร์ (textarea/input + contenteditable) ---------- */
+function setVal(el, v) {
   var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v);
 }
@@ -150,7 +216,8 @@ function move(d) {
   if (d < 0) {
     if (s !== e) { el.setSelectionRange(s, s); return; }
     if (!s) return;
-    el.setSelectionRange([...v.slice(0, s)].slice(0, -1).join('').length, [...v.slice(0, s)].slice(0, -1).join('').length);
+    var p = [...v.slice(0, s)].slice(0, -1).join('').length;
+    el.setSelectionRange(p, p);
   } else {
     if (s !== e) { el.setSelectionRange(e, e); return; }
     if (e >= v.length) return;
@@ -184,7 +251,7 @@ function moveLine(d) {
   }
 }
 
-/* ---------- helper: เสียงคลิกแบบ mechanical keyboard ---------- */
+/* ---------- helper: เสียงคลิก ---------- */
 function snd() {
   if (!sndOn) return;
   try {
@@ -207,6 +274,7 @@ function syncMeta() {
   BAR.lang.textContent = lang === 'th' ? 'ไทย' : 'EN';
 }
 function toggleLang() { lang = lang === 'th' ? 'en' : 'th'; render(); }
+function afterKey() { snd(); shiftUsed = true; if (sticky) sticky = false; syncMeta(); }
 
 function act(id, def, phys) {
   if (id === 'ShiftL' || id === 'ShiftR') {
@@ -216,8 +284,12 @@ function act(id, def, phys) {
   }
   if (id === 'Caps') { caps = !caps; syncMeta(); return; }
   if (id === 'Lang') { toggleLang(); return; }
+  if (id === 'Ctrl' || id === 'Win' || id === 'Alt' || id === 'AltGr') return;
+
+  /* เป้าหมายพิมพ์ไม่ได้ (canvas/div ที่เล็งไว้) → ส่ง key event จำลองให้เกม */
+  if (!typeableTarget() && activeEl && activeEl !== SCR) { dispatchKey(id, def); afterKey(); return; }
+
   if (id === 'Backspace') { delBack(); snd(); return; }
-  if (id === 'Delete')    { delFwd();  snd(); return; }
   if (id === 'Enter')     { ins('\n'); snd(); return; }
   if (id === 'Tab')       { ins(shiftActive() && lang === 'th' ? '๐' : '\t'); snd(); return; }
   if (id === 'Space')     { ins(' ');  snd(); return; }
@@ -225,12 +297,9 @@ function act(id, def, phys) {
   if (id === 'Down')  { moveLine(1);  return; }
   if (id === 'Left')  { move(-1); return; }
   if (id === 'Right') { move(1);  return; }
-  if (id === 'Ctrl' || id === 'Win' || id === 'Alt' || id === 'AltGr') return;
   if (!def || !def.b) return;
   ins(effChar(def));
-  snd(); shiftUsed = true;
-  if (sticky) sticky = false;
-  syncMeta();
+  afterKey();
 }
 
 var hueCounter = 0;
@@ -298,7 +367,7 @@ function render() {
   syncMeta();
 }
 
-/* คีย์บอร์ดจริง sync กับหน้าจอ */
+/* คีย์บอร์ดจริง sync กับหน้าจอ (พิมพ์จริงผ่านคีย์บอร์ดเครื่อง) */
 document.addEventListener('keydown', function (e) {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   var b = codeMap[e.code];
@@ -342,7 +411,7 @@ function injectStyle() {
 function barBtn(label, fn) {
   var b = document.createElement('button');
   b.className = 'osk-btn'; b.textContent = label;
-  b.addEventListener('pointerdown', function (ev) { ev.preventDefault(); });  // กัน focus หลุดจากช่องที่จะพิมพ์
+  b.addEventListener('pointerdown', function (ev) { ev.preventDefault(); });
   b.addEventListener('click', function () { fn(); });
   return b;
 }
@@ -360,11 +429,12 @@ function init(opts) {
   if (!SCR) {
     SCR = document.createElement('textarea');
     SCR.className = 'osk-out';
-    SCR.placeholder = 'แตะช่องไหนของเว็บเพื่อพิมพ์ลงนั้น (ถ้าไม่แตะ จะพิมพ์ลงกล่องนี้)';
+    SCR.placeholder = 'แตะช่องข้อความ หรือกด 🎯 เล็ง element แล้วคลิกเป้าหมาย...';
     container.appendChild(SCR);
   }
   var bar = document.createElement('div'); bar.className = 'osk-bar';
   BAR.lang = barBtn('ไทย', toggleLang);
+  BAR.pick = barBtn('🎯 เล็ง element', function () { togglePick(); });
   BAR.led  = barBtn('ไฟ LED: เปิด', function () {
     ledOn = !ledOn;
     KB.classList.toggle('osk-led', ledOn);
@@ -377,7 +447,7 @@ function init(opts) {
   BAR.clr  = barBtn('ล้างข้อความ', function () { TGT().value = ''; });
   BAR.tgt  = document.createElement('span'); BAR.tgt.className = 'osk-tgt';
   BAR.tgt.textContent = 'พิมพ์ลง: กล่องข้อความของคีย์บอร์ด';
-  bar.appendChild(BAR.lang); bar.appendChild(BAR.led);
+  bar.appendChild(BAR.lang); bar.appendChild(BAR.pick); bar.appendChild(BAR.led);
   bar.appendChild(BAR.snd);  bar.appendChild(BAR.clr); bar.appendChild(BAR.tgt);
   container.appendChild(bar);
 
@@ -401,5 +471,5 @@ function autoInit() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', autoInit);
 else autoInit();
 
-window.OnScreenKeyboard = { init: init, render: render };
+window.OnScreenKeyboard = { init: init, render: render, pick: togglePick };
 })();
