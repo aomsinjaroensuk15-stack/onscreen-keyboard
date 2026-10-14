@@ -1,12 +1,8 @@
 /* ============================================================
- * On-Screen Keyboard  v1.2  —  ไทย / English (Kedmanee, TIS 820)
- * Vanilla JS, zero dependency (inject CSS เอง)
- * v1.2: + โหมด "เล็ง element" (crosshair picker) — สำหรับเกมที่กดเพื่อ focus ไม่ได้
- *       + ถ้าเป้าหมายพิมพ์ไม่ได้ (canvas/div) จะส่ง KeyboardEvent จำลองให้แทน
- * วิธีใช้:
- *   <div id="kb"></div>
- *   <script src="onscreen-keyboard.js"></script>
- *   <script>OnScreenKeyboard.init({container:'#kb'});</script>
+ * On-Screen Keyboard  v1.3  —  ไทย / English (Kedmanee, TIS 820)
+ * Vanilla JS, zero dependency
+ * v1.3: picker ทะลุ iframe (Scratch และเกมที่ embed) + ส่ง keyCode
+ *       ให้ Scratch + กดค้างย้ำปุ่มได้ (key repeat) สำหรับเกม
  * ============================================================ */
 (function () {
 'use strict';
@@ -60,7 +56,7 @@ var CSS = `
 var SCR = null, KB = null, BAR = {}, activeEl = null;
 var lang = 'th', caps = false, held = false, sticky = false, shiftUsed = false;
 var sndOn = true, ledOn = true, ac = null, codeMap = {}, DEFS = {};
-var picking = false, hl = null;
+var picking = false, hl = null, hookedDocs = [], repeatTimer = null;
 
 /* ---------- เป้าหมายการพิมพ์ ---------- */
 function isTypeable(el) {
@@ -76,58 +72,122 @@ function isTypeable(el) {
 }
 function typeableTarget() { return isTypeable(activeEl) ? activeEl : null; }
 function TGT() { return typeableTarget() || SCR; }
+function isGameMode() { return !typeableTarget() && activeEl && activeEl !== SCR; }
 function targetName(el) {
   if (!el) return '—';
   if (el === SCR) return 'กระดานโน้ตของคีย์บอร์ด';
-  return '<' + el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + '>';
+  var n = '<' + el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + '>';
+  if (el.tagName === 'IFRAME') {
+    try { if (el.contentDocument) n += ' (iframe)'; else n = '⚠ iframe ข้ามโดเมน — ส่ง key ไม่ถึง'; }
+    catch (e) { n = '⚠ iframe ข้ามโดเมน — ส่ง key ไม่ถึง'; }
+  }
+  return n;
 }
 function setTarget(el) {
   activeEl = el;
   if (BAR.tgt) BAR.tgt.textContent = 'พิมพ์ลง: ' + targetName(el) + (isTypeable(el) ? '' : ' (ส่ง key event)');
 }
 
-/* จับ focus ปกติ (คลิก/แตะช่องข้อความโดยตรง) */
-document.addEventListener('focusin', function (e) {
-  if (!SCR) return;
-  if (KB && KB.contains(e.target)) return;
-  if (e.target.closest && e.target.closest('.osk-wrap')) return;
-  if (isTypeable(e.target)) setTarget(e.target);
-});
+/* ---------- ทะลุ iframe: หา element จริงที่ (x,y) แม้อยู่ใน iframe ซ้อนกัน ---------- */
+function pierceTarget(doc, x, y) {
+  var el = doc.elementFromPoint(x, y);
+  while (el && el.tagName === 'IFRAME') {
+    var d;
+    try { d = el.contentDocument; } catch (e) { d = null; }   // cross-origin
+    if (!d) return el;
+    var r = el.getBoundingClientRect();
+    var ix = (x - r.left) * (d.documentElement.clientWidth  / r.width);
+    var iy = (y - r.top)  * (d.documentElement.clientHeight / r.height);
+    x = ix; y = iy; doc = d;
+    el = d.elementFromPoint(x, y);
+  }
+  return el;
+}
+/* ตำแหน่งกรอบไฮไลต์แบบ absolute (รวม offset ของ iframe ทุกชั้น) */
+function absRect(el) {
+  var r = el.getBoundingClientRect();
+  var out = { left: r.left, top: r.top, width: r.width, height: r.height };
+  var win = el.ownerDocument.defaultView;
+  var guard = 0;
+  while (win && win.frameElement && guard++ < 10) {
+    var fr = win.frameElement.getBoundingClientRect();
+    out.left += fr.left; out.top += fr.top;
+    win = win.parent;
+  }
+  return out;
+}
 
-/* ---------- โหมด "เล็ง element": crosshair picker ---------- */
+/* ---------- hook document ของ iframe (same-origin) เพื่อให้ pick/เล็งทำงานข้างในได้ ---------- */
+function hookDoc(doc) {
+  if (!doc || hookedDocs.indexOf(doc) >= 0) return;
+  hookedDocs.push(doc);
+  doc.addEventListener('focusin', function (e) {
+    if (!SCR) return;
+    if (isTypeable(e.target)) setTarget(e.target);
+  });
+  doc.addEventListener('mousemove', function (e) { if (picking) pickMove(doc, e.clientX, e.clientY); }, true);
+  doc.addEventListener('mousedown', pickSwallow, true);
+  doc.addEventListener('pointerdown', pickSwallow, true);
+  doc.addEventListener('click', function (e) {
+    if (!picking) return;
+    pickSwallow(e);
+    var el = pierceTarget(doc, e.clientX, e.clientY) || e.target;
+    if (el && el.closest && el.closest('.osk-wrap')) { togglePick(false); return; }
+    setTarget(el);
+    togglePick(false);
+  }, true);
+  doc.addEventListener('keydown', function (e) {
+    if (picking && e.key === 'Escape') { e.stopPropagation(); togglePick(false); }
+  }, true);
+}
+function hookIframesDeep(doc) {
+  var iframes = doc.querySelectorAll('iframe');
+  for (var i = 0; i < iframes.length; i++) {
+    try {
+      var d = iframes[i].contentDocument;
+      if (d) { hookDoc(d); hookIframesDeep(d); }
+    } catch (e) {}
+  }
+}
+
+/* ---------- โหมด "เล็ง element" ---------- */
 function showHl(el) {
   if (!hl) {
     hl = document.createElement('div');
     hl.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;border:2px solid #1a73e8;background:rgba(26,115,232,.15);border-radius:4px;transition:all .05s';
     document.body.appendChild(hl);
   }
-  var r = el.getBoundingClientRect();
+  var r = absRect(el);
   hl.style.display = 'block';
   hl.style.left = (r.left - 3) + 'px'; hl.style.top = (r.top - 3) + 'px';
   hl.style.width = (r.width + 6) + 'px'; hl.style.height = (r.height + 6) + 'px';
   if (BAR.tgt) BAR.tgt.textContent = 'เล็ง: ' + targetName(el);
 }
 function hideHl() { if (hl) hl.style.display = 'none'; }
+function pickMove(doc, x, y) {
+  var el = pierceTarget(doc, x, y);
+  if (el && el !== hl) showHl(el);
+}
+function pickSwallow(e) {
+  if (!picking) return;
+  e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+}
 function togglePick(force) {
   picking = force !== undefined ? force : !picking;
   if (BAR.pick) BAR.pick.classList.toggle('on', picking);
   document.documentElement.style.cursor = picking ? 'crosshair' : '';
-  if (!picking) hideHl();
+  if (picking) hookIframesDeep(document);   // เตรียม hook iframe ทุกตัว (Scratch embed ฯลฯ)
+  else hideHl();
 }
-document.addEventListener('mousemove', function (e) {
-  if (!picking) return;
-  var el = document.elementFromPoint(e.clientX, e.clientY);
-  if (el && (!hl || el !== hl)) showHl(el);
-}, true);
+document.addEventListener('mousemove', function (e) { if (picking) pickMove(document, e.clientX, e.clientY); }, true);
 document.addEventListener('scroll', function () { if (picking) hideHl(); }, true);
-/* กลืน mousedown/click ขณะเล็ง — เกมจะไม่เห็นการคลิกนี้ (ตัวละครไม่ขยับ) */
 ['mousedown', 'pointerdown', 'click'].forEach(function (type) {
   document.addEventListener(type, function (e) {
     if (!picking) return;
-    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+    pickSwallow(e);
     if (type !== 'click') return;
-    var el = document.elementFromPoint(e.clientX, e.clientY) || e.target;
-    if (el.closest && el.closest('.osk-wrap')) { togglePick(false); return; }  // คลิกพลาดในแป้นตัวเอง = ยกเลิก
+    var el = pierceTarget(document, e.clientX, e.clientY) || e.target;
+    if (el && el.closest && el.closest('.osk-wrap')) { togglePick(false); return; }
     setTarget(el);
     togglePick(false);
   }, true);
@@ -136,33 +196,54 @@ document.addEventListener('keydown', function (e) {
   if (picking && e.key === 'Escape') { e.stopPropagation(); togglePick(false); }
 }, true);
 
-/* ---------- ส่ง key event จำลอง (สำหรับเกม canvas/div ที่พิมพ์ไม่ได้) ---------- */
-var KEYMAP = {
-  Backspace: ['Backspace', 'Backspace'], Enter: ['Enter', 'Enter'], Tab: ['Tab', 'Tab'],
-  Space: [' ', 'Space'], Up: ['ArrowUp', 'ArrowUp'], Down: ['ArrowDown', 'ArrowDown'],
-  Left: ['ArrowLeft', 'ArrowLeft'], Right: ['ArrowRight', 'ArrowRight']
+/* ---------- ส่ง key event จำลอง (เกม canvas/div/iframe) ---------- */
+var KEYMAP = {   // id: [key, code, keyCode]
+  Backspace: ['Backspace', 'Backspace', 8], Tab: ['Tab', 'Tab', 9],
+  Enter: ['Enter', 'Enter', 13], Space: [' ', 'Space', 32],
+  Up: ['ArrowUp', 'ArrowUp', 38], Down: ['ArrowDown', 'ArrowDown', 40],
+  Left: ['ArrowLeft', 'ArrowLeft', 37], Right: ['ArrowRight', 'ArrowRight', 39],
+  ShiftL: ['Shift', 'ShiftLeft', 16], ShiftR: ['Shift', 'ShiftRight', 16]
 };
 function dispatchKey(id, def) {
-  if (!activeEl) return;
-  var key, code;
-  if (def && def.b && def.b.length === 1) { key = effChar(def); code = id; }  // id = event.code เช่น KeyQ/Digit1
-  else if (KEYMAP[id]) { key = KEYMAP[id][0]; code = KEYMAP[id][1]; }
+  var el = activeEl;
+  if (!el) return;
+  if (el.tagName === 'IFRAME') {   // เล็งโดนตัว iframe เอง → ยิงเข้าไปข้างใน
+    try {
+      if (el.contentDocument) el = pierceTarget(el.contentDocument,
+        el.contentDocument.documentElement.clientWidth / 2,
+        el.contentDocument.documentElement.clientHeight / 2) || el.contentDocument.body;
+    } catch (e) { return; }
+  }
+  var key, code, kc = 0;
+  if (def && def.b && def.b.length === 1) { key = effChar(def); code = id; kc = key.toUpperCase().charCodeAt(0); }
+  else if (KEYMAP[id]) { key = KEYMAP[id][0]; code = KEYMAP[id][1]; kc = KEYMAP[id][2]; }
   else return;
-  var opts = { key: key, code: code, bubbles: true, cancelable: true };
-  if (key.length === 1) { opts.keyCode = opts.which = key.toUpperCase().charCodeAt(0); }
-  activeEl.dispatchEvent(new KeyboardEvent('keydown', opts));
-  setTimeout(function () { activeEl.dispatchEvent(new KeyboardEvent('keyup', opts)); }, 60);
+  var opts = { key: key, code: code, keyCode: kc, which: kc, bubbles: true, cancelable: true };
+  var W = el.ownerDocument.defaultView || window;   // KeyboardEvent ต้องสร้างจาก window ของ realm นั้น
+  el.dispatchEvent(new W.KeyboardEvent('keydown', opts));
+  setTimeout(function () { el.dispatchEvent(new W.KeyboardEvent('keyup', opts)); }, 60);
 }
+function startRepeat(id, def) {
+  stopRepeat();
+  repeatTimer = setInterval(function () { dispatchKey(id, def); }, 120);   // กดค้าง = ย้ำทุก 120ms
+}
+function stopRepeat() { if (repeatTimer) { clearInterval(repeatTimer); repeatTimer = null; } }
 
-/* ---------- helpers: ตัวอักษรที่จะพิมพ์ ---------- */
+/* focus ปกติ (คลิกช่องข้อความโดยตรง) */
+document.addEventListener('focusin', function (e) {
+  if (!SCR) return;
+  if (KB && KB.contains(e.target)) return;
+  if (e.target.closest && e.target.closest('.osk-wrap')) return;
+  if (isTypeable(e.target)) setTarget(e.target);
+});
+
+/* ---------- helpers: ตัวอักษร / แทรก / ลบ / เลื่อน (โหมดพิมพ์ข้อความ) ---------- */
 function shiftActive() { return held || sticky; }
 function effChar(def) {
   var sh = shiftActive();
   if (/^[a-z]$/.test(def.b) && caps) { return sh ? def.b : def.s; }
   return sh ? (def.s || def.b) : def.b;
 }
-
-/* ---------- helpers: แทรก/ลบ/เลื่อนเคอร์เซอร์ (textarea/input + contenteditable) ---------- */
 function setVal(el, v) {
   var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v);
@@ -216,8 +297,7 @@ function move(d) {
   if (d < 0) {
     if (s !== e) { el.setSelectionRange(s, s); return; }
     if (!s) return;
-    var p = [...v.slice(0, s)].slice(0, -1).join('').length;
-    el.setSelectionRange(p, p);
+    el.setSelectionRange([...v.slice(0, s)].slice(0, -1).join('').length, [...v.slice(0, s)].slice(0, -1).join('').length);
   } else {
     if (s !== e) { el.setSelectionRange(e, e); return; }
     if (e >= v.length) return;
@@ -250,8 +330,6 @@ function moveLine(d) {
     el.setSelectionRange(p2, p2);
   }
 }
-
-/* ---------- helper: เสียงคลิก ---------- */
 function snd() {
   if (!sndOn) return;
   try {
@@ -277,18 +355,27 @@ function toggleLang() { lang = lang === 'th' ? 'en' : 'th'; render(); }
 function afterKey() { snd(); shiftUsed = true; if (sticky) sticky = false; syncMeta(); }
 
 function act(id, def, phys) {
+  if (id === 'Lang') { toggleLang(); return; }
+
+  /* โหมดเกม: เป้าหมายพิมพ์ไม่ได้ (canvas/div ใน iframe) → ส่ง key event */
+  if (isGameMode()) {
+    if (id === 'ShiftL' || id === 'ShiftR') {
+      if (phys) held = true; else if (held) shiftUsed = true; else { held = true; shiftUsed = false; }
+      syncMeta(); dispatchKey(id, null); return;
+    }
+    if (id === 'Caps') { caps = !caps; syncMeta(); return; }
+    dispatchKey(id, def);
+    afterKey();
+    return;
+  }
+
   if (id === 'ShiftL' || id === 'ShiftR') {
     if (phys) { held = true; }
     else if (held) { shiftUsed = true; } else { held = true; shiftUsed = false; }
     syncMeta(); return;
   }
   if (id === 'Caps') { caps = !caps; syncMeta(); return; }
-  if (id === 'Lang') { toggleLang(); return; }
   if (id === 'Ctrl' || id === 'Win' || id === 'Alt' || id === 'AltGr') return;
-
-  /* เป้าหมายพิมพ์ไม่ได้ (canvas/div ที่เล็งไว้) → ส่ง key event จำลองให้เกม */
-  if (!typeableTarget() && activeEl && activeEl !== SCR) { dispatchKey(id, def); afterKey(); return; }
-
   if (id === 'Backspace') { delBack(); snd(); return; }
   if (id === 'Enter')     { ins('\n'); snd(); return; }
   if (id === 'Tab')       { ins(shiftActive() && lang === 'th' ? '๐' : '\t'); snd(); return; }
@@ -326,7 +413,15 @@ function mkBtn(id, base, shift, code, w) {
     b.classList.add('pressed');
     setTimeout(function () { b.classList.remove('pressed'); }, 130);
     act(id, DEFS[id], false);
+    /* โหมดเกม: กดค้าง = ย้ำปุ่ม (เดินต่อได้) */
+    if (isGameMode() && id !== 'ShiftL' && id !== 'ShiftR' && id !== 'Caps' && id !== 'Lang') {
+      startRepeat(id, DEFS[id]);
+    }
   });
+  var stop = function () { stopRepeat(); };
+  b.addEventListener('pointerup', stop);
+  b.addEventListener('pointercancel', stop);
+  b.addEventListener('pointerleave', stop);
   if (id === 'ShiftL' || id === 'ShiftR') {
     var rel = function () {
       if (held && !shiftUsed) sticky = !sticky;
@@ -367,7 +462,7 @@ function render() {
   syncMeta();
 }
 
-/* คีย์บอร์ดจริง sync กับหน้าจอ (พิมพ์จริงผ่านคีย์บอร์ดเครื่อง) */
+/* คีย์บอร์ดจริง sync กับหน้าจอ */
 document.addEventListener('keydown', function (e) {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   var b = codeMap[e.code];
@@ -396,7 +491,7 @@ document.addEventListener('keyup', function (e) {
   }
 });
 window.addEventListener('blur', function () {
-  held = false;
+  held = false; stopRepeat();
   if (KB) KB.querySelectorAll('.pressed').forEach(function (x) { x.classList.remove('pressed'); });
 });
 
@@ -429,7 +524,7 @@ function init(opts) {
   if (!SCR) {
     SCR = document.createElement('textarea');
     SCR.className = 'osk-out';
-    SCR.placeholder = 'แตะช่องข้อความ หรือกด 🎯 เล็ง element แล้วคลิกเป้าหมาย...';
+    SCR.placeholder = 'แตะช่องข้อความ หรือกด 🎯 เล็ง element แล้วคลิกที่ตัวเกมได้เลย (ทะลุ iframe)...';
     container.appendChild(SCR);
   }
   var bar = document.createElement('div'); bar.className = 'osk-bar';
